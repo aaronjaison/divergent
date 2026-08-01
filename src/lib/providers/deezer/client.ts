@@ -1,6 +1,7 @@
 import { cachedFetch, type CacheTtl } from "@/lib/cache/cachedFetch";
 import type { LicenseClass, ProviderId } from "@/lib/db/schema";
 import { providerFetch, qs } from "@/lib/net/httpClient";
+import { penalise } from "@/lib/net/rateLimiter";
 
 /**
  * Shared plumbing for the Deezer provider.
@@ -84,6 +85,14 @@ export class DeezerApiError extends Error {
 export const NO_DATA_CODE = 800;
 
 /**
+ * Quota exhaustion (4) and "service busy" (700) also arrive as HTTP 200, so
+ * httpClient's 429/503 backoff never fires for them and the queue would keep
+ * firing at full reservoir rate into a provider that has just asked for quiet.
+ */
+export const THROTTLE_CODES: ReadonlySet<number> = new Set([4, 700]);
+const THROTTLE_BACKOFF_MS = 10_000;
+
+/**
  * Deezer answers missing ids, malformed paths and quota exhaustion with HTTP
  * 200 and an `{"error":{...}}` body. providerFetch only nulls out responses by
  * status, so its `emptyOn` never fires here and the error object would be
@@ -140,6 +149,10 @@ export async function dzFetch<T = unknown>(
       const error = readDeezerError(payload);
       if (!error) return payload as T;
       if (error.code === NO_DATA_CODE) return null;
+
+      if (error.code !== undefined && THROTTLE_CODES.has(error.code)) {
+        await penalise(DEEZER_PROVIDER, THROTTLE_BACKOFF_MS);
+      }
 
       throw new DeezerApiError(
         error.code,

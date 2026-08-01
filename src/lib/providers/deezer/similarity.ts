@@ -35,21 +35,20 @@ const RELATED_LIMIT = 20;
  * response, meaningless against another provider's scores.
  */
 export function mapSimilarArtists(payload: unknown, limit: number): ScoredArtistRef[] {
-  const rows = dataArray(payload).slice(0, Math.max(1, limit));
-  const total = rows.length;
+  // Unusable rows are dropped *before* the position score is taken: scoring by
+  // raw index would let one nameless row push every real neighbour down a rank,
+  // and the engine spends its track budget in proportion to these scores.
+  const usable = dataArray(payload)
+    .filter(isRecord)
+    .map((row) => ({ name: str(row.name), externalId: idOf(row.id) }))
+    .filter(
+      (row): row is { name: string; externalId: string | undefined } =>
+        row.name !== undefined,
+    )
+    .slice(0, Math.max(0, limit));
 
-  return rows
-    .map((row, index) => {
-      if (!isRecord(row)) return null;
-      const name = str(row.name);
-      if (!name) return null;
-      return {
-        name,
-        externalId: idOf(row.id),
-        score: (total - index) / total,
-      } satisfies ScoredArtistRef;
-    })
-    .filter((ref): ref is ScoredArtistRef => ref !== null);
+  const total = usable.length;
+  return usable.map((row, index) => ({ ...row, score: (total - index) / total }));
 }
 
 export const deezerSimilarity: SimilarityProvider = {

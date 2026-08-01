@@ -8,6 +8,15 @@ import {
   yearFromReleaseDate,
 } from "./client";
 
+// Bottleneck's real queue would make every test wait out the Deezer reservoir;
+// the stub still routes through providerFetch, and exposes penalise so the
+// HTTP-200 throttle path can be asserted.
+const penalise = vi.hoisted(() => vi.fn(() => Promise.resolve()));
+vi.mock("@/lib/net/rateLimiter", () => ({
+  limiterFor: () => ({ schedule: <T>(fn: () => Promise<T>) => fn() }),
+  penalise,
+}));
+
 // The real cache is SQLite-backed; importing it would open the app database
 // from a unit test. The stub runs the fetcher straight through so dzFetch's own
 // error handling is still exercised.
@@ -41,6 +50,11 @@ const BAD_PATH_ERROR = {
   },
 };
 
+/** Quota exhaustion — HTTP 200 as well, so nothing upstream sees a 429. */
+const QUOTA_ERROR = {
+  error: { type: "Exception", message: "Quota limit exceeded", code: 4 },
+};
+
 const OK_PAYLOAD = { data: [{ id: 138547413, title: "You", duration: 208 }], total: 12 };
 
 function stubJson(body: unknown): void {
@@ -56,6 +70,7 @@ function stubJson(body: unknown): void {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  penalise.mockClear();
 });
 
 describe("readDeezerError", () => {
@@ -86,6 +101,20 @@ describe("dzFetch", () => {
   it("throws on non-data errors so a transient failure is never cached as empty", async () => {
     stubJson(BAD_PATH_ERROR);
     await expect(dzFetch("/artist/399/toppp", {}, ttl)).rejects.toBeInstanceOf(DeezerApiError);
+  });
+
+  it("backs the queue off when a quota error arrives as HTTP 200", async () => {
+    stubJson(QUOTA_ERROR);
+    await expect(dzFetch("/artist/399/top", { limit: 50 }, ttl)).rejects.toBeInstanceOf(
+      DeezerApiError,
+    );
+    expect(penalise).toHaveBeenCalledWith("deezer", expect.any(Number));
+  });
+
+  it("does not back off for an error that says nothing about load", async () => {
+    stubJson(BAD_PATH_ERROR);
+    await expect(dzFetch("/artist/399/toppp", {}, ttl)).rejects.toBeInstanceOf(DeezerApiError);
+    expect(penalise).not.toHaveBeenCalled();
   });
 
   it("passes a genuine payload through", async () => {

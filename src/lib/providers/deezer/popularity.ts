@@ -210,10 +210,13 @@ export function mapTracks(payload: unknown, context: TrackContext = {}): TrackRe
 async function findArtistByName(name: string): Promise<DeezerArtistHit | null> {
   const query = str(name);
   if (!query) return null;
+  // TTL.search, not TTL.catalog: this payload is also the nb_fan source for
+  // getArtistPopularity on an unresolved artist, and a 90-day-fresh fan count
+  // would contradict the 7 days the same number gets via /artist/{id}.
   const payload = await dzFetch(
     "/search/artist",
     { q: query, limit: ARTIST_SEARCH_LIMIT },
-    TTL.catalog,
+    TTL.search,
   );
   return pickArtistMatch(payload, query);
 }

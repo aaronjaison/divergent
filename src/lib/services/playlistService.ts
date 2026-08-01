@@ -7,6 +7,7 @@ import { saveSimilarArtists } from "@/lib/db/repo/similarity";
 import { saveArtistTags } from "@/lib/db/repo/tags";
 import { savePopularity } from "@/lib/db/repo/recordings";
 import { selectByDepth } from "@/lib/engine/obscurity";
+import { blendedSimilarity, tagOverlap } from "@/lib/engine/scoring";
 import type {
   EngineArtist,
   EngineTrack,
@@ -176,7 +177,13 @@ export async function runIntroduce(
 
   // Blend
   ctx.progress(1, 6, "Finding similar artists…");
-  const similar = await findSimilarArtists(artistRef, 10, constraints.obscurity);
+  const similar = await findSimilarArtists(
+    artistRef,
+    10,
+    constraints.obscurity,
+    detail.data.tags,
+    ctx,
+  );
 
   if (similar.length === 0) {
     warnings.push(`No similar artists were found for ${detail.data.name}.`);
@@ -233,6 +240,8 @@ async function findSimilarArtists(
   artist: ArtistRef,
   limit: number,
   band: ObscurityBand,
+  seedTags: Record<string, number>,
+  ctx: JobContext,
 ): Promise<ScoredArtistRef[]> {
   const merged = new Map<string, ScoredArtistRef>();
 
@@ -264,7 +273,34 @@ async function findSimilarArtists(
   }
 
   const ranked = [...merged.values()].sort((a, b) => b.score - a.score);
-  return selectByDepth(ranked, band, limit);
+  if (ranked.length === 0) return [];
+
+  // Genre-check the strongest candidates. Capped because each lookup costs a
+  // MusicBrainz request at 1/s; the rest keep their raw similarity, which only
+  // matters if the checked set turns out too thin to fill the playlist.
+  const CHECK_LIMIT = 24;
+  const toCheck = ranked.slice(0, CHECK_LIMIT).filter((a) => a.mbid);
+
+  const rescored: ScoredArtistRef[] = [];
+  for (const [index, candidate] of toCheck.entries()) {
+    ctx.progress(index, toCheck.length, `Checking ${candidate.name}…`);
+    try {
+      const detail = await catalog.getArtist(candidate.mbid as string);
+      const overlap = detail ? tagOverlap(seedTags, detail.data.tags) : 0;
+      rescored.push({
+        ...candidate,
+        score: blendedSimilarity(candidate.score, overlap, band),
+      });
+      if (detail) rememberArtist({ ...detail.data, tags: detail.data.tags });
+    } catch {
+      rescored.push(candidate);
+    }
+  }
+
+  const pool = rescored.length >= limit ? rescored : ranked;
+  pool.sort((a, b) => b.score - a.score);
+
+  return selectByDepth(pool, band, limit);
 }
 
 // --- Style playlists -----------------------------------------------------
