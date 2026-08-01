@@ -1,3 +1,4 @@
+import { songIdentity } from "@/lib/text";
 import type { EngineTrack, StyleConstraints } from "./types";
 
 /**
@@ -11,7 +12,9 @@ import type { EngineTrack, StyleConstraints } from "./types";
 const EXCLUDED_TITLE = new RegExp(
   [
     "\\blive\\b(?!\\s*(?:and|forever|wire|through))", // "Live at ..." but not "Live Forever"
-    "\\bremix\\b",
+    "\\bremix(?:es)?\\b",
+    "\\brmx\\b", // remix albums abbreviate it, e.g. "Separator (Anstam RMX)"
+    "\\bre-?edit\\b",
     "\\bedit\\b",
     "\\binstrumental\\b",
     "\\bkaraoke\\b",
@@ -47,8 +50,23 @@ const EXCLUDED_SECONDARY_TYPES = new Set([
   "demo",
 ]);
 
+/**
+ * Album titles that signal a release we never want to mine for tracks.
+ *
+ * MusicBrainz flags these with secondary types, but the popularity provider
+ * does not — it only distinguishes album from single/EP. Without this, a
+ * remix or live album reads as a legitimate studio record full of unfamiliar
+ * tracks, which is exactly what a deep-cuts search is looking for.
+ */
+const EXCLUDED_ALBUM_TITLE =
+  /\b(rmx|remix(es)?|live (?:at|in|from)|unplugged|greatest hits|best of|the best of|anthology|karaoke|tribute|instrumentals?|a cappella|acapella|commentary|soundtrack|score)\b/i;
+
 export function isExcludedTitle(title: string): boolean {
   return EXCLUDED_TITLE.test(title);
+}
+
+export function isExcludedAlbumTitle(title: string): boolean {
+  return EXCLUDED_ALBUM_TITLE.test(title);
 }
 
 export function isExcludedReleaseType(secondaryTypes: readonly string[] = []): boolean {
@@ -93,6 +111,9 @@ export function passesFilters(
 /**
  * Drops repeats of the same song. Keeps the first occurrence, which callers
  * order by preference (better match confidence and known popularity first).
+ *
+ * Matches on song identity rather than exact title, so an artist's studio and
+ * acoustic takes of one song cannot both land in the same playlist.
  */
 export function dedupeTracks(tracks: readonly EngineTrack[]): EngineTrack[] {
   const seenKeys = new Set<string>();
@@ -100,7 +121,7 @@ export function dedupeTracks(tracks: readonly EngineTrack[]): EngineTrack[] {
   const out: EngineTrack[] = [];
 
   for (const track of tracks) {
-    const songKey = `${track.artistKey}::${track.titleNorm}`;
+    const songKey = `${track.artistKey}::${songIdentity(track.title)}`;
     if (seenKeys.has(track.key) || seenSongs.has(songKey)) continue;
     seenKeys.add(track.key);
     seenSongs.add(songKey);

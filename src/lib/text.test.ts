@@ -3,6 +3,7 @@ import {
   normalizeArtistName,
   normalizeIsrc,
   normalizeTitle,
+  songIdentity,
   stringSimilarity,
 } from "./text";
 
@@ -36,6 +37,23 @@ describe("normalizeTitle", () => {
     expect(normalizeTitle("Teardrop (Mad Professor Remix)")).not.toBe(
       normalizeTitle("Teardrop"),
     );
+  });
+});
+
+describe("songIdentity", () => {
+  it("collapses alternate takes of one song", () => {
+    const creep = songIdentity("Creep");
+    expect(songIdentity("Creep (Acoustic)")).toBe(creep);
+    expect(songIdentity("Creep - Live at Glastonbury")).toBe(creep);
+    expect(songIdentity("Creep [Demo]")).toBe(creep);
+    // A remix is a different recording, but for playlist purposes it is still
+    // the same song and must not appear alongside the original.
+    expect(songIdentity("Creep (Mad Professor Remix)")).toBe(creep);
+  });
+
+  it("keeps genuinely different songs apart", () => {
+    expect(songIdentity("Creep")).not.toBe(songIdentity("Creep Show"));
+    expect(songIdentity("No Surprises")).not.toBe(songIdentity("Surprise"));
   });
 });
 

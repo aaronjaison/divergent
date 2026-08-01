@@ -5,6 +5,7 @@ import {
   bandAffinity,
   inBand,
   percentileRanks,
+  selectByDepth,
   selectTracksForBand,
 } from "./obscurity";
 
@@ -57,6 +58,40 @@ describe("bands", () => {
         expect(bandAffinity(percentile, band)).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+describe("selectByDepth", () => {
+  const ranked = Array.from({ length: 100 }, (_, i) => ({ id: i }));
+
+  it("keeps the obvious neighbours in easy mode", () => {
+    expect(selectByDepth(ranked, "easy", 5).map((r) => r.id)).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it("skips the head of the list in medium and hard mode", () => {
+    // The top of a co-listening list is whoever is most listened to overall —
+    // true co-listens, useless recommendations.
+    expect(selectByDepth(ranked, "medium", 5)[0].id).toBeGreaterThan(0);
+    expect(selectByDepth(ranked, "hard", 5)[0].id).toBeGreaterThan(
+      selectByDepth(ranked, "medium", 5)[0].id,
+    );
+  });
+
+  it("never skips so far that it cannot fill the request", () => {
+    const short = Array.from({ length: 6 }, (_, i) => ({ id: i }));
+    for (const band of ["easy", "medium", "hard"] as const) {
+      expect(selectByDepth(short, band, 5)).toHaveLength(5);
+    }
+  });
+
+  it("returns what it can from a list smaller than the request", () => {
+    const tiny = [{ id: 0 }, { id: 1 }];
+    expect(selectByDepth(tiny, "hard", 5)).toHaveLength(2);
+  });
+
+  it("handles empty input and zero counts", () => {
+    expect(selectByDepth([], "easy", 5)).toEqual([]);
+    expect(selectByDepth(ranked, "easy", 0)).toEqual([]);
   });
 });
 

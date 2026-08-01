@@ -83,6 +83,34 @@ export function bandAffinity(percentile: number, band: ObscurityBand): number {
 }
 
 /**
+ * Selects from a similarity-ranked list at the depth the band implies.
+ *
+ * The top of a co-listening similarity list is dominated by whoever is most
+ * listened to overall — ask for artists like Radiohead and the first answers
+ * are Nirvana, Coldplay and the Beatles. Those are true co-listens and useless
+ * recommendations, since anyone asking already knows them. Skipping the head
+ * of the list is what turns similarity into discovery.
+ *
+ * 'easy' keeps the obvious neighbours, which is the right answer for someone
+ * who wants a gentle way in.
+ */
+export function selectByDepth<T>(
+  ranked: readonly T[],
+  band: ObscurityBand,
+  count: number,
+): T[] {
+  if (ranked.length === 0 || count <= 0) return [];
+
+  const skipFraction = band === "easy" ? 0 : band === "medium" ? 0.15 : 0.35;
+  let start = Math.floor(ranked.length * skipFraction);
+
+  // Never skip so far that we cannot fill the request.
+  start = Math.min(start, Math.max(0, ranked.length - count));
+
+  return ranked.slice(start, start + count);
+}
+
+/**
  * Picks tracks from one artist at the depth the band implies: the hits for
  * 'easy', album-track territory for 'medium', the bottom of the catalogue for
  * 'hard'.

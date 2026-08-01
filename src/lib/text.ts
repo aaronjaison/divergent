@@ -39,6 +39,25 @@ export function normalizeArtistName(input: string): string {
   return normalizeTitle(input).replace(/^the\s+/, "");
 }
 
+/**
+ * Identity of the underlying song, ignoring which version this is.
+ *
+ * Stronger than normalizeTitle: it drops every parenthetical and bracketed
+ * qualifier, so "Creep", "Creep (Acoustic)" and "Creep - Live" collapse to one
+ * key. Used only for playlist dedupe — a playlist that opens with Creep and
+ * closes with Creep (Acoustic) reads as a bug, whatever the catalogue says.
+ *
+ * Deliberately NOT used for cross-source matching, where an acoustic take and
+ * the studio version are genuinely different recordings.
+ */
+export function songIdentity(input: string): string {
+  return normalizeTitle(
+    input
+      .replace(/[([][^)\]]*[)\]]/g, " ")
+      .replace(/\s+-\s+.*$/, " "),
+  );
+}
+
 /** 0-1 similarity via normalised Levenshtein distance. */
 export function stringSimilarity(a: string, b: string): number {
   const left = normalizeTitle(a);
