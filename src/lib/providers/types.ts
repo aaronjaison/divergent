@@ -38,6 +38,14 @@ export interface ScoredArtistRef extends ArtistRef {
   country?: string;
   beginYear?: number;
   endYear?: number;
+  /**
+   * The artist's own genre profile, tag -> 0-1, when the provider supplied one.
+   * Absent means unknown, which the engine treats as neutral rather than as a
+   * mismatch — tag coverage thins out fast below the famous, and scoring a
+   * missing profile as "does not belong" would exclude the smaller artists
+   * this app exists to surface.
+   */
+  tags?: Record<string, number>;
 }
 
 export interface AlbumRef {
@@ -86,6 +94,14 @@ export interface CatalogProvider {
   getArtist(mbid: string): Promise<Sourced<ArtistDetail> | null>;
   getArtistAlbums(mbid: string): Promise<Sourced<AlbumRef[]>>;
   getAlbumTracks(album: AlbumRef): Promise<Sourced<TrackRef[]>>;
+  /**
+   * Genre profiles for many artists at once, keyed by MBID.
+   *
+   * Optional, and worth having because judging whether a candidate fits the
+   * rest of a playlist needs every candidate's profile, not the handful an
+   * artist-at-a-time lookup can afford at one request per second.
+   */
+  getTagProfiles?(mbids: readonly string[]): Promise<Sourced<Map<string, Record<string, number>>>>;
 }
 
 export interface TagProvider {

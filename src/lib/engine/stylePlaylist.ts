@@ -7,6 +7,7 @@ import {
 } from "./interleave";
 import { bandAffinity, percentileRanks, selectTracksForBand } from "./obscurity";
 import { createRng, weightedSampleWithoutReplacement } from "./random";
+import { selectCoherent } from "./scoring";
 import { dedupeTracks, passesFilters } from "./titleFilters";
 import type {
   EngineArtist,
@@ -24,6 +25,13 @@ import type {
  * came from, which is what lets non-commercial providers be swapped out later
  * without touching this file.
  */
+
+/**
+ * How much fitting the rest of the playlist outweighs raw tag affinity. Lower
+ * than discovery's, because here the listener named the style themselves and
+ * the request has to stay recognisable as the thing they asked for.
+ */
+const COHESION = 0.5;
 
 export interface StylePlaylistInput {
   seeds: WeightedTag[];
@@ -88,10 +96,46 @@ export function generateStylePlaylist(
     return tags * bandAffinity(percentile, constraints.obscurity);
   };
 
+  /**
+   * A requested tag can be far broader than a playlist: "rap" is answered
+   * equally well by a drill record and a lo-fi bedroom track, and a pool
+   * scored only on "does this artist match the tag" samples across that whole
+   * spread. The result is technically on-topic and incoherent to listen to.
+   *
+   * So candidates are first narrowed to a group that fits each other, using
+   * the requested tags as the anchor. Broad requests settle into one corner;
+   * an already-narrow request has only one corner to find and is unaffected.
+   */
+  const anchor: Record<string, number> = {};
+  for (const seed of seeds) anchor[seed.tag] = seed.weight;
+
   // Over-sample: some artists will yield nothing once filters run.
   const artistsNeeded = Math.ceil(constraints.targetLength / constraints.maxPerArtist);
   const sampleSize = Math.min(eligible.length, Math.ceil(artistsNeeded * 2.5));
-  const sampled = weightedSampleWithoutReplacement(eligible, weightOf, sampleSize, rng);
+
+  const coherent = selectCoherent(
+    eligible
+      .filter((artist) => weightOf(artist) > 0)
+      .map((artist) => ({
+        item: artist,
+        tags: artist.tags ?? {},
+        score: weightOf(artist),
+      })),
+    anchor,
+    sampleSize,
+    COHESION,
+  );
+
+  const coherentWeight = new Map(coherent.map((c) => [c.item.key, c.value]));
+
+  // Sampling still happens, so two runs of the same request differ — but it now
+  // draws from a coherent shortlist rather than the whole spread of the tag.
+  const sampled = weightedSampleWithoutReplacement(
+    coherent.map((c) => c.item),
+    (artist) => coherentWeight.get(artist.key) ?? 0,
+    sampleSize,
+    rng,
+  );
 
   if (sampled.length === 0) {
     return {

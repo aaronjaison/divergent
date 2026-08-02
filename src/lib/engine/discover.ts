@@ -1,7 +1,9 @@
 import { capPerArtist, relaxToFill } from "./diversity";
 import { interleave, separateAdjacent, type Queue } from "./interleave";
 import { bandAffinity, percentileRanks, selectTracksForBand } from "./obscurity";
+import { selectCoherent } from "./scoring";
 import { dedupeTracks, passesFilters } from "./titleFilters";
+import { normalizeArtistName } from "@/lib/text";
 import type {
   EngineArtist,
   EngineTrack,
@@ -23,9 +25,21 @@ import type {
  * one track each and why the seed never appears.
  */
 
+/**
+ * How much genre fit outweighs raw similarity when choosing artists. High,
+ * because unconstrained co-listening similarity is precisely what produces a
+ * playlist that is technically related and unlistenable in sequence.
+ */
+const COHESION = 0.65;
+
 export interface DiscoverInput {
   /** Only used for the per-track explanation; contributes no tracks. */
   seedArtistName: string;
+  /**
+   * The seed artist's genre profile. Anchors the playlist's centre so it can
+   * settle into a corner of their sound without wandering out of it.
+   */
+  seedTags?: Readonly<Record<string, number>>;
   /** Similar artists, each carrying a 0-1 similarity in `score`. */
   similar: { artist: EngineArtist; score: number }[];
   constraints: StyleConstraints;
@@ -44,6 +58,7 @@ export interface DiscoverInput {
 export function buildDiscovery(input: DiscoverInput): GeneratedPlaylist {
   const {
     seedArtistName,
+    seedTags = {},
     similar,
     constraints,
     trackBand = "easy",
@@ -82,25 +97,69 @@ export function buildDiscovery(input: DiscoverInput): GeneratedPlaylist {
   const percentileByKey = new Map<string, number>();
   known.forEach((entry, index) => percentileByKey.set(entry.artist.key, ranks[index]));
 
-  const contributors = eligible
-    .map((entry) => ({
-      ...entry,
-      // Unknown audience size sits at the median: a provider gap is not
-      // evidence of obscurity, and treating it as such would flood the
-      // playlist with artists we simply failed to look up.
-      weight:
-        entry.score *
-        bandAffinity(percentileByKey.get(entry.artist.key) ?? 50, constraints.obscurity),
-    }))
-    .sort((a, b) => b.weight - a.weight);
+  const prior = eligible.map((entry) => ({
+    item: entry,
+    tags: entry.artist.tags ?? {},
+    // Unknown audience size sits at the median: a provider gap is not
+    // evidence of obscurity, and treating it as such would flood the
+    // playlist with artists we simply failed to look up.
+    score:
+      entry.score *
+      bandAffinity(percentileByKey.get(entry.artist.key) ?? 50, constraints.obscurity),
+  }));
+
+  /**
+   * Chosen for fit with each other, not just with the seed. Both a drill
+   * artist and a breakbeat-pop one can be honest answers to "who is like this
+   * broad rap act", and putting them in one playlist is still wrong — the
+   * seed's genre is a starting point, and the playlist has to pick a lane
+   * within it. selectCoherent moves the target as it goes, so it does.
+   */
+  const ordered = selectCoherent(prior, seedTags, prior.length, COHESION);
+
+  // Weighted by POSITION in that greedy order, not by the value it was scored
+  // with. Those values are each measured against a different centroid — the
+  // one that existed when the pick was made — so they do not compare across
+  // picks, and using them directly as weights threw away the very ordering
+  // this pass exists to produce.
+  const contributors = ordered.map((picked, index) => ({
+    ...picked.item,
+    weight: (ordered.length - index) / ordered.length,
+  }));
 
   const queues: Queue<EngineTrack>[] = [];
   const reserves: EngineTrack[] = [];
 
+  // The seed artist is excluded by key upstream, but a track can still credit
+  // them as a guest on somebody else's record — a discovery playlist that ends
+  // on "PinkPantheress, Sam Gellaitry" has broken its one promise. Credits are
+  // checked per track, not per artist.
+  const seedCredit = normalizeArtistName(seedArtistName);
+  const creditsSeed = (track: EngineTrack) =>
+    seedCredit.length > 0 &&
+    track.artistNames.some((name) => normalizeArtistName(name) === seedCredit);
+
   for (const entry of contributors) {
-    const usable = dedupeTracks(
-      entry.artist.tracks.filter((track) => passesFilters(track, constraints)),
+    const all = dedupeTracks(
+      entry.artist.tracks.filter(
+        (track) => passesFilters(track, constraints) && !creditsSeed(track),
+      ),
     );
+
+    // A guest verse on somebody else's record is the wrong way to meet an
+    // artist, and it reads as an incoherent pick besides: choosing Megan Thee
+    // Stallion and playing a Maroon 5 single looks like the playlist wandered
+    // off, whoever the feature belongs to. Guest spots are kept only for
+    // artists who have nothing else to offer.
+    const own = entry.artist.name
+      ? all.filter(
+          (track) =>
+            normalizeArtistName(track.artistNames[0] ?? "") ===
+            normalizeArtistName(entry.artist.name),
+        )
+      : all;
+
+    const usable = own.length > 0 ? own : all;
     if (usable.length === 0) continue;
 
     const picked = selectTracksForBand(usable, trackBand, constraints.maxPerArtist);

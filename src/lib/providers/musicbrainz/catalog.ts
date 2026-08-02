@@ -81,6 +81,11 @@ function countryOf(artist: MbArtist): string | undefined {
 
 export function mapArtist(artist: MbArtist): ScoredArtistRef {
   const lifeSpan = artist["life-span"];
+  // Search hits carry the artist's whole tag list already, so the genre profile
+  // that lets the engine judge whether a candidate fits the rest of the
+  // playlist costs no extra request. Dropping it was why nothing downstream
+  // could tell a drill artist from a breakbeat-pop one under the same tag.
+  const tags = mergeTags(artist.genres, artist.tags);
   return {
     mbid: artist.id,
     name: artist.name,
@@ -91,6 +96,7 @@ export function mapArtist(artist: MbArtist): ScoredArtistRef {
     country: countryOf(artist),
     beginYear: parseYear(lifeSpan?.begin),
     endYear: parseYear(lifeSpan?.end),
+    tags: Object.keys(tags).length > 0 ? tags : undefined,
   };
 }
 
@@ -261,6 +267,12 @@ async function browseReleases(
   return envelope?.releases ?? [];
 }
 
+/**
+ * MBIDs per batched tag-profile request. Well inside both the 100-result page
+ * limit and any sane URL length at ~47 characters per clause.
+ */
+const TAG_PROFILE_BATCH = 50;
+
 export const musicbrainzCatalog: CatalogProvider = {
   id: MB_PROVIDER,
 
@@ -281,6 +293,36 @@ export const musicbrainzCatalog: CatalogProvider = {
       .slice(0, limit);
 
     return sourced(results, MB_PROVIDER, MB_CORE_LICENSE);
+  },
+
+  async getTagProfiles(mbids) {
+    const unique = [...new Set(mbids.filter((id) => id))];
+    const profiles = new Map<string, Record<string, number>>();
+
+    // One artist lookup per candidate would cost a second each, which is why
+    // genre checking used to be rationed to a couple of dozen. The search
+    // index takes a disjunction of ids and returns each artist's whole tag
+    // list, so a hundred candidates cost two requests instead of a hundred.
+    for (let i = 0; i < unique.length; i += TAG_PROFILE_BATCH) {
+      const batch = unique.slice(i, i + TAG_PROFILE_BATCH);
+      const envelope = await mbFetch(
+        "/artist",
+        {
+          query: batch.map((id) => `arid:${id}`).join(" OR "),
+          limit: MB_MAX_LIMIT,
+        },
+        mbArtistSearchSchema,
+        TTL.tags,
+      );
+
+      for (const artist of parseEach(envelope?.artists, mbArtistSchema)) {
+        const tags = mergeTags(artist.genres, artist.tags);
+        if (Object.keys(tags).length > 0) profiles.set(artist.id, tags);
+      }
+    }
+
+    // Tag-derived, so it carries the tag licence rather than the core one.
+    return sourced(profiles, MB_PROVIDER, mbTagLicense());
   },
 
   async getArtist(mbid) {

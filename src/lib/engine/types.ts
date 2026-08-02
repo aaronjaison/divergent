@@ -40,8 +40,14 @@ export interface EngineArtist {
   key: string;
   mbid?: string;
   name: string;
-  /** tag name -> 0-1 affinity. */
+  /** How strongly this artist answers the tags that were REQUESTED. */
   tagAffinity: Record<string, number>;
+  /**
+   * The artist's own genre profile, tag -> 0-1 — what they actually are, as
+   * opposed to what was asked for. Used to judge whether they belong with the
+   * rest of the playlist. Empty means unknown and is treated as neutral.
+   */
+  tags?: Record<string, number>;
   /** 0-100 within-source popularity; undefined when no provider matched. */
   popularity?: number;
   tracks: EngineTrack[];

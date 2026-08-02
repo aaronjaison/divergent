@@ -7,7 +7,7 @@ import { saveSimilarArtists } from "@/lib/db/repo/similarity";
 import { saveArtistTags } from "@/lib/db/repo/tags";
 import { savePopularity } from "@/lib/db/repo/recordings";
 import { selectByDepth } from "@/lib/engine/obscurity";
-import { blendedSimilarity, tagOverlap } from "@/lib/engine/scoring";
+import { rankByGenreThenSimilarity, tagCosine } from "@/lib/engine/scoring";
 import type {
   EngineArtist,
   EngineTrack,
@@ -382,6 +382,9 @@ async function loadContributors(
         mbid: neighbour.mbid,
         name: neighbour.name,
         tagAffinity: {},
+        // Without this the engine had no way to tell one neighbour from
+        // another, so coherence could only ever be checked against the seed.
+        tags: neighbour.tags,
         popularity: artistPopularity?.data,
         tracks: pool.tracks,
       },
@@ -473,6 +476,7 @@ export async function runDiscover(
 
   const result = buildDiscovery({
     seedArtistName: detail.data.name,
+    seedTags: detail.data.tags,
     similar: contributors,
     constraints,
     // The seed is already excluded upstream, but a similarity provider that
@@ -558,20 +562,48 @@ async function findSimilarArtists(
     }
   }
 
+  /** Attaches genre profiles to everything in `merged`, batched. */
+  const profileAll = async () => {
+    if (!catalog.getTagProfiles) return;
+    const needed = [...merged.values()]
+      .filter((a) => a.mbid && !a.tags)
+      .map((a) => a.mbid as string);
+    if (needed.length === 0) return;
+
+    try {
+      const profiles = await catalog.getTagProfiles(needed);
+      for (const [key, candidate] of merged) {
+        const tags = candidate.mbid ? profiles.data.get(candidate.mbid) : undefined;
+        if (tags) merged.set(key, { ...candidate, tags });
+      }
+    } catch {
+      // Ordering falls back to similarity alone, which is the old behaviour.
+    }
+  };
+
+  ctx.progress(1, 3, "Checking genres…");
+  await profileAll();
+
+  const fitOf = (candidate: ScoredArtistRef) =>
+    candidate.tags ? tagCosine(seedTags, candidate.tags) : undefined;
+
   // ListenBrainz returns about a hundred neighbours per artist, which is short
-  // of what a long playlist needs at one or two tracks each. Neighbours of the
-  // nearest neighbours still sound like the seed and cost one cached call
-  // apiece, so the graph is walked one step further rather than the playlist
-  // being cut short. They arrive discounted: two steps out is a weaker claim
-  // than one, and the ordering has to say so.
-  if (merged.size < limit * 2) {
+  // of what a long playlist needs — and after genre filtering it is far
+  // shorter, because most of those neighbours turn out to share nothing with
+  // the seed but an audience. So the graph is walked one step further.
+  //
+  // Crucially the walk starts from the best-FITTING neighbours rather than the
+  // most co-listened ones. Expanding from a superstar co-listen returns more
+  // superstars; expanding from the one genuine jungle artist in the list
+  // returns more jungle artists, which is where the underground actually is.
+  if (merged.size < limit * 3) {
     const nearest = [...merged.values()]
-      .sort((a, b) => b.score - a.score)
       .filter((candidate) => candidate.mbid)
+      .sort((a, b) => (fitOf(b) ?? 0) - (fitOf(a) ?? 0))
       .slice(0, SECOND_DEGREE_SEEDS);
 
     for (const [index, near] of nearest.entries()) {
-      if (merged.size >= limit * 3) break;
+      if (merged.size >= limit * 5) break;
       ctx.progress(index, nearest.length, `Looking beyond ${near.name}…`);
       try {
         const result = await similarityProviders[0].getSimilarArtists(
@@ -583,55 +615,53 @@ async function findSimilarArtists(
         // Same no-SLA reasoning as above.
       }
     }
+
+    await profileAll();
   }
 
-  const ranked = [...merged.values()].sort((a, b) => b.score - a.score);
-  if (ranked.length === 0) return [];
+  const all = [...merged.values()];
+  if (all.length === 0) return [];
 
-  // Genre-check the strongest candidates: co-listening similarity answers "who
-  // else do these listeners play?", not "who sounds like this?". Capped because
-  // each lookup costs a MusicBrainz request at 1/s.
-  const checkLimit = Math.min(
-    MAX_GENRE_CHECKS,
-    Math.max(24, Math.ceil(limit * 1.5)),
+  const fits = all.map(fitOf);
+
+  // An artist MusicBrainz has no tags for is treated as exactly average rather
+  // than as a mismatch. Scoring the unknown at zero would bury the smallest
+  // artists, who are the least tagged and the whole point of the exercise;
+  // scoring it high would let them outrank verified matches.
+  const measured = fits.filter((value): value is number => value !== undefined);
+  const meanFit =
+    measured.length > 0 ? measured.reduce((a, b) => a + b, 0) / measured.length : 0.5;
+
+  /**
+   * Candidates with no measurable genre relationship at all are dropped
+   * outright, not merely down-weighted — around half of any co-listening list
+   * scores exactly zero against the seed. They only survive if removing them
+   * would leave too few artists to build from, in which case a thin playlist
+   * of the right kind still beats a full one of the wrong kind, but an empty
+   * one beats neither.
+   */
+  const scored = all.map((candidate, index) => ({
+    candidate,
+    fit: fits[index] ?? meanFit,
+  }));
+
+  const onGenre = scored.filter((entry) => entry.fit > 0);
+  const usable = onGenre.length >= limit ? onGenre : scored;
+
+  const ordering = rankByGenreThenSimilarity(
+    usable.map((entry) => ({ similarity: entry.candidate.score, fit: entry.fit })),
+    band,
   );
-  const toCheck = ranked.slice(0, checkLimit).filter((a) => a.mbid);
 
-  const rescored: ScoredArtistRef[] = [];
-  const factors: number[] = [];
+  const pool = usable
+    .map((entry, index) => ({ ...entry.candidate, score: ordering[index] }))
+    .sort((a, b) => b.score - a.score);
 
-  for (const [index, candidate] of toCheck.entries()) {
-    ctx.progress(index, toCheck.length, `Checking ${candidate.name}…`);
-    try {
-      const detail = await catalog.getArtist(candidate.mbid as string);
-      const overlap = detail ? tagOverlap(seedTags, detail.data.tags) : 0;
-      const score = blendedSimilarity(candidate.score, overlap, band);
-      if (candidate.score > 0) factors.push(score / candidate.score);
-      rescored.push({ ...candidate, score });
-      if (detail) rememberArtist({ ...detail.data, tags: detail.data.tags });
-    } catch {
-      rescored.push(candidate);
+  for (const candidate of pool) {
+    if (candidate.mbid && candidate.tags) {
+      rememberArtist({ mbid: candidate.mbid, name: candidate.name, tags: candidate.tags });
     }
   }
-
-  if (rescored.length === 0) return selectByDepth(ranked, band, limit);
-
-  // Candidates past the check budget keep their raw similarity, which is on a
-  // different scale — the genre cross-check only ever lowers a score, so an
-  // unchecked artist would outrank every verified one. Shrinking them by the
-  // average penalty measured on this seed's own neighbours puts both groups
-  // back on one scale, and leaves a checked artist who genuinely diverges from
-  // the seed's genre below an unchecked one, which is the correct outcome.
-  const checked = new Set(rescored.map((a) => (a.mbid ?? a.name).toLowerCase()));
-  const meanFactor =
-    factors.length > 0 ? factors.reduce((a, b) => a + b, 0) / factors.length : 1;
-
-  const pool = [
-    ...rescored,
-    ...ranked
-      .filter((a) => !checked.has((a.mbid ?? a.name).toLowerCase()))
-      .map((a) => ({ ...a, score: a.score * meanFactor })),
-  ].sort((a, b) => b.score - a.score);
 
   return selectByDepth(pool, band, limit);
 }
@@ -641,9 +671,6 @@ const SECOND_DEGREE_SEEDS = 6;
 
 /** Two steps out is a weaker claim than one, and scores have to reflect that. */
 const SECOND_DEGREE_DISCOUNT = 0.7;
-
-/** MusicBrainz genre lookups per generation — 1/s, so this is ~a minute. */
-const MAX_GENRE_CHECKS = 55;
 
 // --- Style playlists -----------------------------------------------------
 
@@ -804,6 +831,8 @@ function addArtist(
 
   if (existing) {
     existing.tagAffinity[tag] = Math.max(existing.tagAffinity[tag] ?? 0, affinity);
+    // A second tag's search may carry a profile the first one lacked.
+    if (!existing.tags && artist.tags) existing.tags = artist.tags;
     return;
   }
 
@@ -812,6 +841,8 @@ function addArtist(
     mbid: artist.mbid,
     name: artist.name,
     tagAffinity: { [tag]: affinity },
+    // Rides along in the tag search response — see mapArtist.
+    tags: artist.tags,
     tracks: [],
   });
 }

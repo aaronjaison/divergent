@@ -105,20 +105,61 @@ Where a mode genuinely cannot reach the requested length — Radiohead has aroun
 36 real deep cuts, not 80 — the playlist is marked `partial` and says so rather
 than padding.
 
-### Why discovery bands on fame, not just similarity
+### Genre coherence: why ranks, not multipliers
 
 Co-listening similarity answers "who else do these listeners play?", not "who
 sounds like this?". Asked who is similar to Radiohead it truthfully returns Pink
 Floyd, the Beatles and Led Zeppelin — all correct, and all useless to someone
 looking for something new.
 
-Two corrections handle this, and both are needed:
+The first attempt at fixing this scaled similarity by genre overlap. It does not
+work, and the measurements say so. Asked who is like PinkPantheress:
 
-1. `blendedSimilarity` in `src/lib/engine/scoring.ts` weights raw similarity by
-   genre overlap, so co-listening artefacts from a different genre fall away.
-2. `buildDiscovery` bands on audience size, computed **within the candidate
-   pool**. How famous an artist is relative to the others who sound like this
-   one is the only comparison that means anything.
+| Candidate | Co-listening similarity | Genre fit |
+| --- | --- | --- |
+| The Weeknd | 1.000 | 0.029 |
+| Nia Archives (the right answer) | 0.223 | 0.294 |
+
+Any multiplier leaves The Weeknd about three times higher, because a superstar's
+co-listening score is an order of magnitude larger than an underground artist's
+and a fractional penalty cannot close that gap. Roughly **half** of a typical
+co-listening list scores exactly zero genre fit against the seed.
+
+So `rankByGenreThenSimilarity` combines the two by **rank**, which is scale-free:
+an artist first on genre and fiftieth on co-listening beats one first on
+co-listening and fiftieth on genre. Four things build on that:
+
+1. **Tag specificity** (`tagSpecificity`) — sharing "hip hop" is close to no
+   evidence; sharing "trap metal" is strong evidence. Umbrella categories are
+   discounted and non-genre tags ("2020s", "british", "seen live") are ignored.
+   `alternative rock` counts as an umbrella: Radiohead, Train and The Fray all
+   carry it.
+2. **Coherence with the group, not just the seed** (`selectCoherent`) —
+   similarity is not transitive. Both a drill artist and a breakbeat-pop one can
+   be honest answers for a broad rap seed, and pairing them is still wrong.
+   Selection is greedy against a moving centroid, so the playlist picks a lane
+   and stays in it.
+3. **A genre gate** — candidates with no measurable genre relationship are
+   dropped outright, not down-weighted, unless that would leave too few to build
+   from.
+4. **Fame banding within the pool** (`buildDiscovery`) — how well-known an artist
+   is *relative to the others who sound like this one* is the only comparison
+   that means anything.
+
+The payoff is the one worth having: filtering hard on genre is also what surfaces
+the smaller artists, because the noise it removes is almost entirely famous.
+PinkPantheress went from Maroon 5 and Harry Styles to Pola & Bryson, Technimatic,
+Redeyes and Hybrid Minds.
+
+Making this affordable needed `getTagProfiles`, which fetches genre profiles for
+a hundred artists in two batched `arid:` searches rather than a hundred
+one-per-second lookups. Genre checking used to be rationed to about two dozen
+candidates; it is now total, and generation got faster.
+
+Tag specificity is a curated tier list rather than a computed one. The principled
+version is inverse document frequency over the tag corpus, which needs a
+pre-seeded frequency table — the tiers capture most of the same effect because
+the categories broad enough to mislead are a small, stable set.
 
 ### Why a single long-lived process
 

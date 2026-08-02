@@ -187,3 +187,90 @@ describe("buildDiscovery", () => {
     }
   });
 });
+
+describe("buildDiscovery genre coherence", () => {
+  const trap = (i: number) => ({ "hip hop": 1, trap: 0.9, "trap metal": 0.6 - i * 0.01 });
+  const garage = (i: number) => ({ "uk garage": 1, "future garage": 0.8, jungle: 0.6 - i * 0.01 });
+
+  /**
+   * The reference complaint: both halves are credible neighbours of a broad
+   * rap seed, and mixing them is still wrong.
+   */
+  function mixedPool() {
+    return [
+      ...Array.from({ length: 12 }, (_, i) => ({
+        artist: { ...makeArtist(`Trap ${i}`, { trackCount: 8 }), tags: trap(i) },
+        score: 0.5,
+      })),
+      ...Array.from({ length: 12 }, (_, i) => ({
+        artist: { ...makeArtist(`Garage ${i}`, { trackCount: 8 }), tags: garage(i) },
+        score: 0.5,
+      })),
+    ];
+  }
+
+  it("picks one side of a split pool rather than half of each", () => {
+    const { tracks } = buildDiscovery({
+      seedArtistName: "Some Rapper",
+      seedTags: { "hip hop": 1, rap: 0.8, trap: 0.6 },
+      similar: mixedPool(),
+      constraints: constraints({ targetLength: 10, maxPerArtist: 1 }),
+    });
+
+    const trapCount = tracks.filter((t) => t.artistKey.startsWith("Trap")).length;
+    expect(trapCount).toBeGreaterThanOrEqual(8);
+  });
+
+  it("leaves out an artist whose only link is a shared umbrella tag", () => {
+    const { tracks } = buildDiscovery({
+      seedArtistName: "Some Rapper",
+      seedTags: { "hip hop": 1, trap: 0.9 },
+      similar: [
+        // Far more co-listened, and shares nothing but the umbrella.
+        {
+          artist: {
+            ...makeArtist("Umbrella Only", { trackCount: 8 }),
+            tags: { pop: 1, "hip hop": 0.2 },
+          },
+          score: 1,
+        },
+        ...Array.from({ length: 10 }, (_, i) => ({
+          artist: { ...makeArtist(`Trap ${i}`, { trackCount: 8 }), tags: trap(i) },
+          score: 0.2,
+        })),
+      ],
+      constraints: constraints({ targetLength: 6, maxPerArtist: 1 }),
+    });
+
+    expect(tracks.some((t) => t.artistKey === "Umbrella Only")).toBe(false);
+  });
+
+  it("never plays a track the seed artist is credited on", () => {
+    const guest = makeArtist("Collaborator", { trackCount: 4 });
+    guest.tracks[0].artistNames = ["Collaborator", "Seed Star"];
+
+    const { tracks } = buildDiscovery({
+      seedArtistName: "Seed Star",
+      similar: [{ artist: guest, score: 1 }],
+      constraints: constraints({ targetLength: 4, maxPerArtist: 4 }),
+    });
+
+    expect(
+      tracks.some((t) => t.artistNames.some((n) => /seed star/i.test(n))),
+    ).toBe(false);
+  });
+
+  it("prefers an artist's own record over their guest verse", () => {
+    const artist = makeArtist("Megan", { trackCount: 3 });
+    // Most popular track is a guest spot on somebody else's single.
+    artist.tracks[0].artistNames = ["Some Pop Band", "Megan"];
+
+    const { tracks } = buildDiscovery({
+      seedArtistName: "A Rapper",
+      similar: [{ artist, score: 1 }],
+      constraints: constraints({ targetLength: 1, maxPerArtist: 1 }),
+    });
+
+    expect(tracks[0].artistNames[0]).toBe("Megan");
+  });
+});
