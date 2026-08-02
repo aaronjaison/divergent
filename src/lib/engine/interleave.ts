@@ -81,6 +81,46 @@ export function interleave<T>(
 }
 
 /**
+ * Regroups a list so consecutive items rarely share a key, by emitting one item
+ * per key in rotation.
+ *
+ * This exists because separateAdjacent is a repair pass, and a repair pass
+ * scales badly: it makes a single forward sweep looking for a later item to
+ * swap with, which works when a 25-track playlist has a handful of collisions
+ * and fails on a 200-track one where every artist's picks arrived side by side
+ * and the tail has nothing left to trade with. Distributing up front leaves
+ * almost nothing to repair.
+ *
+ * Input order decides the rotation order, so a caller that sampled its items
+ * randomly gets a random rotation.
+ */
+export function roundRobinByKey<T>(
+  items: readonly T[],
+  keyOf: (item: T) => string,
+): T[] {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const key = keyOf(item);
+    const group = groups.get(key);
+    if (group) group.push(item);
+    else groups.set(key, [item]);
+  }
+
+  const lists = [...groups.values()];
+  let depth = 0;
+  for (const list of lists) depth = Math.max(depth, list.length);
+
+  const out: T[] = [];
+  for (let round = 0; round < depth; round++) {
+    for (const list of lists) {
+      if (round < list.length) out.push(list[round]);
+    }
+  }
+
+  return out;
+}
+
+/**
  * Reorders so the same artist never sits back-to-back, by swapping the
  * offending track with the nearest later one from a different artist.
  * Returns the input order when no legal arrangement exists (e.g. a two-artist

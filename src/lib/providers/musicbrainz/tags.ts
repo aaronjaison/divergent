@@ -31,6 +31,15 @@ const RELEVANCE_WEIGHT = 0.1;
 const MAX_GENRE_PAGES = 40;
 
 /**
+ * Ceiling on tag-search paging. A 200-track playlist at one track per artist
+ * needs 200 artists that survive filtering, which is more than the single page
+ * this used to fetch. Four pages is ~4.4s of MusicBrainz budget once, then
+ * cached for TTL.tags; past that the relevance tail stops being about the tag
+ * at all.
+ */
+const MAX_TAG_PAGES = 4;
+
+/**
  * Always quoted, even for a single word: unquoted, `tag:dream pop` parses as
  * `tag:dream` plus a free-text `pop` and returns a completely different set.
  */
@@ -89,16 +98,37 @@ export const musicbrainzTags: Pick<TagProvider, "id" | "getArtistsForTag"> = {
     const trimmed = tag.trim();
     if (!trimmed) return sourced([], MB_PROVIDER, mbTagLicense());
 
-    // Always fetch the full page regardless of `limit`: the local re-rank is
-    // only as good as the pool it sees, and a wider page costs the same call.
-    const envelope = await mbFetch(
-      "/artist",
-      { query: tagQuery(trimmed), limit: MB_MAX_LIMIT },
-      mbArtistSearchSchema,
-      TTL.tags,
-    );
+    // Always fetch whole pages regardless of `limit`: the local re-rank is only
+    // as good as the pool it sees, and a full page costs the same call as a
+    // partial one.
+    const pages = Math.min(MAX_TAG_PAGES, Math.max(1, Math.ceil(limit / MB_MAX_LIMIT)));
+    const raws: unknown[] = [];
 
-    const ranked = rankArtistsForTag(envelope?.artists, trimmed).slice(0, limit);
+    for (let page = 0; page < pages; page++) {
+      const envelope = await mbFetch(
+        "/artist",
+        {
+          query: tagQuery(trimmed),
+          limit: MB_MAX_LIMIT,
+          // Omitted on the first page so the cache key matches the shape used
+          // before paging existed, keeping every warm single-page entry valid.
+          offset: page === 0 ? undefined : page * MB_MAX_LIMIT,
+        },
+        mbArtistSearchSchema,
+        TTL.tags,
+      );
+
+      const artists = envelope?.artists ?? [];
+      raws.push(...artists);
+
+      // Ranking across the whole pool, not per page, is the point of paging:
+      // page two routinely holds artists with more votes for the tag than
+      // anything Lucene put on page one.
+      const total = envelope?.count ?? 0;
+      if (artists.length < MB_MAX_LIMIT || (page + 1) * MB_MAX_LIMIT >= total) break;
+    }
+
+    const ranked = rankArtistsForTag(raws, trimmed).slice(0, limit);
     return sourced(ranked, MB_PROVIDER, mbTagLicense());
   },
 };

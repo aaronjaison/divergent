@@ -14,6 +14,7 @@ export interface ArtistResult {
 interface Props {
   onSelect: (artist: ArtistResult) => void;
   selected: ArtistResult | null;
+  label?: string;
 }
 
 /** Describes an artist enough to tell two same-named acts apart. */
@@ -27,7 +28,11 @@ function subtitle(artist: ArtistResult): string {
   return parts.join(" · ");
 }
 
-export function ArtistSearch({ onSelect, selected }: Props) {
+export function ArtistSearch({
+  onSelect,
+  selected,
+  label = "Which artist?",
+}: Props) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<ArtistResult[]>([]);
   const [loading, setLoading] = useState(false);
@@ -100,7 +105,7 @@ export function ArtistSearch({ onSelect, selected }: Props) {
   return (
     <div>
       <label htmlFor="artist-search" className="block text-sm font-medium">
-        Which artist?
+        {label}
       </label>
       <input
         id="artist-search"

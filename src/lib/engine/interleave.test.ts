@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { distributeSeed, interleave, separateAdjacent } from "./interleave";
+import {
+  distributeSeed,
+  interleave,
+  roundRobinByKey,
+  separateAdjacent,
+} from "./interleave";
 import { createRng } from "./random";
 
 interface Item {
@@ -115,5 +120,50 @@ describe("distributeSeed", () => {
   it("drains both lists completely", () => {
     const result = distributeSeed(["s1", "s2"], ["o1", "o2", "o3"], 2);
     expect(result.slice().sort()).toEqual(["o1", "o2", "o3", "s1", "s2"]);
+  });
+});
+
+describe("roundRobinByKey", () => {
+  const keyOf = (item: string) => item.split(":")[0];
+
+  it("separates a list where each key's items arrived together", () => {
+    const input = ["a:1", "a:2", "b:1", "b:2", "c:1", "c:2"];
+    const result = roundRobinByKey(input, keyOf);
+
+    for (let i = 1; i < result.length; i++) {
+      expect(keyOf(result[i])).not.toBe(keyOf(result[i - 1]));
+    }
+  });
+
+  it("keeps every item exactly once", () => {
+    const input = ["a:1", "a:2", "a:3", "b:1", "c:1", "c:2"];
+    const result = roundRobinByKey(input, keyOf);
+    expect(result.slice().sort()).toEqual(input.slice().sort());
+  });
+
+  it("preserves each key's internal order", () => {
+    const input = ["a:1", "a:2", "a:3", "b:1", "b:2"];
+    const result = roundRobinByKey(input, keyOf).filter((i) => keyOf(i) === "a");
+    expect(result).toEqual(["a:1", "a:2", "a:3"]);
+  });
+
+  it("rotates in order of first appearance, so a random input stays random", () => {
+    const result = roundRobinByKey(["c:1", "a:1", "b:1", "c:2", "a:2"], keyOf);
+    expect(result).toEqual(["c:1", "a:1", "b:1", "c:2", "a:2"]);
+  });
+
+  it("tolerates a single key and an empty list", () => {
+    expect(roundRobinByKey(["a:1", "a:2"], keyOf)).toEqual(["a:1", "a:2"]);
+    expect(roundRobinByKey([], keyOf)).toEqual([]);
+  });
+
+  it("scales: 150 keys with two items each never repeat back to back", () => {
+    const input = Array.from({ length: 150 }, (_, i) => [`k${i}:1`, `k${i}:2`]).flat();
+    const result = roundRobinByKey(input, keyOf);
+
+    expect(result).toHaveLength(300);
+    for (let i = 1; i < result.length; i++) {
+      expect(keyOf(result[i])).not.toBe(keyOf(result[i - 1]));
+    }
   });
 });

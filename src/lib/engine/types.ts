@@ -61,6 +61,13 @@ export interface StyleConstraints {
   maxDurationMs?: number;
 }
 
+/**
+ * The longest playlist we will build. Set by Soundiiz's import endpoint, which
+ * rejects anything over 200 tracks — building more would produce a playlist
+ * that cannot reach the streaming service it was made for.
+ */
+export const MAX_PLAYLIST_LENGTH = 200;
+
 export const DEFAULT_CONSTRAINTS = {
   targetLength: 25,
   maxPerArtist: 2,

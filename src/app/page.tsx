@@ -21,7 +21,7 @@ export default async function Home() {
         </p>
       </section>
 
-      <section className="grid gap-5 sm:grid-cols-2">
+      <section className="grid gap-5 sm:grid-cols-3">
         <Link
           href="/builder"
           className="group rounded-xl border border-border bg-surface p-6 transition-colors hover:border-accent"
@@ -45,6 +45,19 @@ export default async function Home() {
           <p className="mt-2 text-sm text-muted">
             Three ways in: the tracks everyone knows, the deep cuts that reward
             a second listen, or a blend with artists who share their sound.
+          </p>
+        </Link>
+
+        <Link
+          href="/discover"
+          className="group rounded-xl border border-border bg-surface p-6 transition-colors hover:border-accent"
+        >
+          <h2 className="text-xl font-medium group-hover:text-accent">
+            Discover similar artists
+          </h2>
+          <p className="mt-2 text-sm text-muted">
+            Name an artist you love and hear everyone else who sounds like them
+            — one track each, and never the artist you named.
           </p>
         </Link>
       </section>

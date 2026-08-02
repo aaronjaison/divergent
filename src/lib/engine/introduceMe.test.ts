@@ -58,6 +58,69 @@ describe("buildFamous", () => {
     });
     expect(warnings.length).toBeGreaterThan(0);
   });
+
+  it("tops up a long request from the albums when the charts run out", () => {
+    // Only 6 tracks carry chart popularity; the album pool supplies the rest.
+    const charting: EngineArtist = {
+      key: "Bjork",
+      name: "Bjork",
+      tagAffinity: {},
+      tracks: discography.tracks.slice(0, 6),
+    };
+
+    const { tracks, warnings } = buildFamous({
+      artist: charting,
+      constraints: constraints({ targetLength: 20 }),
+      supplement: discography.tracks.slice(6),
+    });
+
+    expect(tracks).toHaveLength(20);
+    expect(warnings.join(" ")).toMatch(/album/i);
+    // The real hits keep the front of the playlist and their own explanation.
+    expect(tracks.slice(0, 6).every((t) => t.reason?.includes("best-known"))).toBe(true);
+    expect(tracks[19].reason).toMatch(/standout|catalogue/i);
+  });
+
+  it("never lets a supplement track displace a charting one", () => {
+    const charting: EngineArtist = {
+      key: "Bjork",
+      name: "Bjork",
+      tagAffinity: {},
+      tracks: [makeTrack("Bjork", "Actual Hit", { popularity: 40 })],
+    };
+
+    const { tracks } = buildFamous({
+      artist: charting,
+      constraints: constraints({ targetLength: 3 }),
+      // Album-normalised 100 means "best track on a quiet record", not "hit".
+      supplement: [
+        makeTrack("Bjork", "Album Opener", { popularity: 100 }),
+        makeTrack("Bjork", "Album Filler", { popularity: 20 }),
+      ],
+    });
+
+    expect(tracks[0].title).toBe("Actual Hit");
+  });
+
+  it("drops a supplement track that duplicates a charting one", () => {
+    const charting: EngineArtist = {
+      key: "Bjork",
+      name: "Bjork",
+      tagAffinity: {},
+      tracks: [makeTrack("Bjork", "Hyperballad", { popularity: 90 })],
+    };
+
+    const { tracks } = buildFamous({
+      artist: charting,
+      constraints: constraints({ targetLength: 5 }),
+      supplement: [
+        makeTrack("Bjork", "Hyperballad", { key: "other-id", popularity: 100 }),
+        makeTrack("Bjork", "Isobel", { popularity: 80 }),
+      ],
+    });
+
+    expect(tracks.map((t) => t.title)).toEqual(["Hyperballad", "Isobel"]);
+  });
 });
 
 describe("buildDeepCuts", () => {

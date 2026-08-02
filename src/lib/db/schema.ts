@@ -272,6 +272,8 @@ export const PLAYLIST_KINDS = [
   "introduce_famous",
   "introduce_deep",
   "introduce_blend",
+  /** Similar artists only — the seed artist is deliberately absent. */
+  "discover_artists",
 ] as const;
 export type PlaylistKind = (typeof PLAYLIST_KINDS)[number];
 

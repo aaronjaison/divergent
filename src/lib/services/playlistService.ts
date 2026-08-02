@@ -15,10 +15,13 @@ import type {
   StyleConstraints,
 } from "@/lib/engine/types";
 import { buildBlend, buildDeepCuts, buildFamous } from "@/lib/engine/introduceMe";
+import { buildDiscovery } from "@/lib/engine/discover";
 import { generateStylePlaylist } from "@/lib/engine/stylePlaylist";
+import { passesFilters } from "@/lib/engine/titleFilters";
 import { seedFromString } from "@/lib/engine/random";
 import { catalog, popularity, similarityProviders, tags } from "@/lib/providers/registry";
 import type { ArtistRef, ScoredArtistRef } from "@/lib/providers/types";
+import { normalizeArtistName } from "@/lib/text";
 import type { JobContext } from "./generationJobs";
 import { loadAlbumTracks, loadCatalogTracks, loadTopTracks } from "./trackPool";
 
@@ -31,6 +34,46 @@ import { loadAlbumTracks, loadCatalogTracks, loadTopTracks } from "./trackPool";
 export interface GenerationResult {
   warnings: string[];
   trackCount: number;
+}
+
+// --- Pool sizing ---------------------------------------------------------
+
+/**
+ * Everything below exists because the honest failure mode of this app is a
+ * playlist that stops short. Asking for 200 tracks and getting 140 is the
+ * complaint these numbers answer, so each pool is sized from the request
+ * rather than fixed, and deliberately overshoots: between artists the
+ * popularity provider cannot resolve, title filters and cross-artist dedupe, a
+ * meaningful share of any shortlist yields nothing at all.
+ */
+
+/** Distinct artists a playlist of this shape needs before any losses. */
+function artistsNeededFor(targetLength: number, maxPerArtist: number): number {
+  return Math.ceil(targetLength / Math.max(1, maxPerArtist));
+}
+
+/**
+ * Hard ceiling on artists resolved in one generation. Each costs a rate-limited
+ * round trip, so this is what stops a 200-track request turning into a
+ * ten-minute job; past it we would rather return a slightly shorter playlist
+ * than leave someone watching a progress bar.
+ */
+const MAX_SHORTLIST = 260;
+
+/**
+ * Stop loading once the pool could fill the playlist this many times over.
+ * Above 1 so the engine still has something to choose between — sampling from a
+ * pool that exactly fits makes the obscurity band meaningless.
+ */
+const POOL_HEADROOM = 1.6;
+
+/**
+ * Albums to read for a track target, assuming a couple of usable deep cuts
+ * each. The ceiling stops a long request walking a 200-record discography one
+ * rate-limited call at a time.
+ */
+function albumsNeededFor(targetLength: number): number {
+  return Math.min(40, Math.max(12, Math.ceil(targetLength / 2)));
 }
 
 function toTrackInputs(tracks: readonly EngineTrack[]): PlaylistTrackInput[] {
@@ -120,7 +163,10 @@ export async function runIntroduce(
 
   if (submode === "famous") {
     ctx.progress(1, 4, "Finding their best-known tracks…");
-    const pool = await loadTopTracks(artistRef, artistKey, 60);
+    const want = constraints.targetLength;
+    const pool = await loadTopTracks(artistRef, artistKey, Math.max(60, want));
+
+    let supplement: EngineTrack[] = [];
 
     if (pool.tracks.length === 0) {
       ctx.progress(2, 4, "Falling back to their catalogue…");
@@ -131,10 +177,23 @@ export async function runIntroduce(
       );
     } else {
       engineArtist.tracks = pool.tracks;
+
+      // The chart endpoint stops at 100 tracks however many are asked for, so a
+      // longer request can only be filled from the albums. buildFamous keeps
+      // the two apart — see its `supplement` docs.
+      if (pool.tracks.length < want) {
+        ctx.progress(2, 4, "Looking through their albums…");
+        const albums = await loadAlbumTracks(artistRef, artistKey, {
+          maxAlbums: albumsNeededFor(want - pool.tracks.length),
+          onProgress: (done, total) =>
+            ctx.progress(2 + done / Math.max(1, total), 4, `Reading album ${done + 1} of ${total}…`),
+        });
+        supplement = albums.tracks;
+      }
     }
 
     ctx.progress(3, 4, "Building the playlist…");
-    const result = buildFamous({ artist: engineArtist, constraints });
+    const result = buildFamous({ artist: engineArtist, constraints, supplement });
     return persist(input.playlistId, result, warnings);
   }
 
@@ -143,13 +202,18 @@ export async function runIntroduce(
     const top = await loadTopTracks(artistRef, artistKey, 50);
 
     const albums = await loadAlbumTracks(artistRef, artistKey, {
+      maxAlbums: albumsNeededFor(constraints.targetLength),
       onProgress: (done, total) =>
         ctx.progress(1 + done / Math.max(1, total), 4, `Reading album ${done + 1} of ${total}…`),
     });
 
     let tracks = albums.tracks;
     if (tracks.length === 0) {
-      const fallback = await loadCatalogTracks(artistMbid, artistKey, 8);
+      const fallback = await loadCatalogTracks(
+        artistMbid,
+        artistKey,
+        albumsNeededFor(constraints.targetLength),
+      );
       tracks = fallback.tracks;
       if (tracks.length > 0) {
         warnings.push(
@@ -161,9 +225,22 @@ export async function runIntroduce(
     engineArtist.tracks = tracks;
     ctx.progress(3, 4, "Picking the deep cuts…");
 
+    // Two per album is the ideal, but an artist with twelve records cannot fill
+    // a 200-track request that way. Rather than silently returning a quarter of
+    // what was asked for, dig further into each album — capped, because past
+    // about six the "deep cut" claim collapses into "the album, minus singles".
+    const albumCount = new Set(
+      tracks.map((track) => track.albumKey ?? track.album ?? "unknown"),
+    ).size;
+    const maxPerAlbum = Math.min(
+      6,
+      Math.max(2, Math.ceil(constraints.targetLength / Math.max(1, albumCount))),
+    );
+
     const result = buildDeepCuts({
       artist: engineArtist,
       constraints,
+      maxPerAlbum,
       // Anything in the top tracks is by definition not a deep cut. Both the
       // key and the normalised title are excluded, because the same song often
       // has different ids across a single/album pairing.
@@ -177,9 +254,25 @@ export async function runIntroduce(
 
   // Blend
   ctx.progress(1, 6, "Finding similar artists…");
+
+  // The seed takes SEED_SHARE of the playlist, so the neighbours only have to
+  // cover the rest — sized from the request rather than the fixed 10 this used
+  // to ask for, which capped a blend at roughly 22 tracks whatever was chosen.
+  //
+  // Asked for with margin: requesting exactly enough neighbours means every one
+  // that the popularity provider cannot resolve comes straight off the end of
+  // the playlist. loadContributors stops early once it has enough, so the
+  // margin costs nothing when the artists do resolve.
+  const neighboursWanted = Math.ceil(
+    artistsNeededFor(
+      Math.ceil(constraints.targetLength * (1 - SEED_SHARE)),
+      constraints.maxPerArtist,
+    ) * 1.5,
+  );
+
   const similar = await findSimilarArtists(
     artistRef,
-    10,
+    neighboursWanted,
     constraints.obscurity,
     detail.data.tags,
     ctx,
@@ -189,22 +282,77 @@ export async function runIntroduce(
     warnings.push(`No similar artists were found for ${detail.data.name}.`);
   }
 
-  const seedPool = await loadTopTracks(artistRef, artistKey, 40);
+  const seedWanted = Math.ceil(constraints.targetLength * SEED_SHARE);
+  const seedPool = await loadTopTracks(
+    artistRef,
+    artistKey,
+    Math.max(40, seedWanted * 2),
+  );
   engineArtist.tracks = seedPool.tracks.length
     ? seedPool.tracks
     : (await loadCatalogTracks(artistMbid, artistKey, 4)).tracks;
 
-  const contributors: { artist: EngineArtist; score: number }[] = [];
-  for (const [index, neighbour] of similar.entries()) {
-    ctx.progress(2 + index, 2 + similar.length + 1, `Adding ${neighbour.name}…`);
+  const contributors = await loadContributors(similar, constraints, ctx, {
+    label: (name) => `Adding ${name}…`,
+    // Neighbours only fill the non-seed slots, so stop counting against those
+    // rather than against the whole playlist — otherwise the loop never
+    // reaches its target and the early stop never fires.
+    capacityTarget: Math.ceil(
+      constraints.targetLength * (1 - SEED_SHARE) * POOL_HEADROOM,
+    ),
+  });
 
+  const result = buildBlend({
+    seedArtist: engineArtist,
+    similar: contributors,
+    constraints,
+    seedShare: SEED_SHARE,
+  });
+  return persist(input.playlistId, result, warnings);
+}
+
+/** Share of a blend reserved for the artist being introduced. */
+const SEED_SHARE = 0.35;
+
+/**
+ * Resolves similar artists into track pools, stopping as soon as enough tracks
+ * are in hand. Shared by the blend and discovery modes, which differ in what
+ * they do with the result rather than in how they gather it.
+ */
+async function loadContributors(
+  similar: readonly ScoredArtistRef[],
+  constraints: StyleConstraints,
+  ctx: JobContext,
+  options: {
+    label: (name: string) => string;
+    capacityTarget?: number;
+    /**
+     * Fetch each artist's audience size. Costs nothing extra in practice — the
+     * search response that resolved the artist already carried it, so this is a
+     * cache hit — but it is only worth carrying where the caller bands on it.
+     */
+    withPopularity?: boolean;
+  } = {
+    label: (name) => `Adding ${name}…`,
+  },
+): Promise<{ artist: EngineArtist; score: number }[]> {
+  const capacityTarget =
+    options.capacityTarget ?? Math.ceil(constraints.targetLength * POOL_HEADROOM);
+
+  const contributors: { artist: EngineArtist; score: number }[] = [];
+  let capacity = 0;
+
+  for (const [index, neighbour] of similar.entries()) {
+    ctx.progress(index, similar.length + 1, options.label(neighbour.name));
+
+    const ref: ArtistRef = { mbid: neighbour.mbid, name: neighbour.name };
     const key = neighbour.mbid ?? neighbour.name;
-    const pool = await loadTopTracks(
-      { mbid: neighbour.mbid, name: neighbour.name },
-      key,
-      25,
-    );
+    const pool = await loadTopTracks(ref, key, 25);
     if (pool.tracks.length === 0) continue;
+
+    const artistPopularity = options.withPopularity
+      ? await popularity?.getArtistPopularity(ref).catch(() => null)
+      : null;
 
     contributors.push({
       artist: {
@@ -212,19 +360,105 @@ export async function runIntroduce(
         mbid: neighbour.mbid,
         name: neighbour.name,
         tagAffinity: {},
+        popularity: artistPopularity?.data,
         tracks: pool.tracks,
       },
       score: neighbour.score,
     });
+
+    // Count only what this artist can actually contribute after the cap and the
+    // filters, so an artist whose catalogue is all live albums doesn't count
+    // towards the target and then vanish in the engine.
+    const usable = pool.tracks.filter((track) => passesFilters(track, constraints));
+    capacity += Math.min(constraints.maxPerArtist, usable.length);
+    if (capacity >= capacityTarget) break;
   }
 
-  ctx.progress(2 + similar.length, 2 + similar.length + 1, "Building the blend…");
+  ctx.progress(similar.length, similar.length + 1, "Building the playlist…");
+  return contributors;
+}
 
-  const result = buildBlend({
-    seedArtist: engineArtist,
+// --- Discover similar artists --------------------------------------------
+
+export interface DiscoveryInput {
+  playlistId: string;
+  artistMbid: string;
+  artistName: string;
+  constraints: StyleConstraints;
+}
+
+/** Candidates gathered per seat, so the obscurity band has something to reject. */
+const DISCOVERY_OVERSHOOT = 2.5;
+
+/**
+ * Every slot goes to someone else. The seed artist is the query, not a
+ * contributor — see buildDiscovery for why that is the whole point of the mode.
+ */
+export async function runDiscover(
+  input: DiscoveryInput,
+  ctx: JobContext,
+): Promise<GenerationResult> {
+  const { artistMbid, constraints } = input;
+  const warnings: string[] = [];
+
+  ctx.progress(0, 4, `Looking up ${input.artistName}…`);
+
+  const detail = await catalog.getArtist(artistMbid);
+  if (!detail) {
+    return { warnings: ["That artist could not be found."], trackCount: 0 };
+  }
+
+  rememberArtist({ ...detail.data, tags: detail.data.tags });
+
+  const artistRef: ArtistRef = { mbid: detail.data.mbid, name: detail.data.name };
+
+  // Deliberately over-fetched. The obscurity band works by pushing the
+  // best-known artists down the order, and that only removes anyone if there
+  // are more candidates than seats — load exactly enough and the band becomes
+  // decorative.
+  const wanted = Math.min(
+    MAX_SHORTLIST,
+    Math.ceil(
+      artistsNeededFor(constraints.targetLength, constraints.maxPerArtist) *
+        DISCOVERY_OVERSHOOT,
+    ),
+  );
+
+  ctx.progress(1, 4, `Finding artists who sound like ${detail.data.name}…`);
+  const similar = await findSimilarArtists(
+    artistRef,
+    wanted,
+    constraints.obscurity,
+    detail.data.tags,
+    ctx,
+  );
+
+  if (similar.length === 0) {
+    return {
+      warnings: [
+        `No similar artists were found for ${detail.data.name}. They may be too new or too obscure to have listening data yet.`,
+      ],
+      trackCount: 0,
+    };
+  }
+
+  const contributors = await loadContributors(similar, constraints, ctx, {
+    label: (name) => `Listening to ${name}…`,
+    // Audience size is what the band is applied to — see buildDiscovery.
+    withPopularity: true,
+    capacityTarget: Math.ceil(constraints.targetLength * DISCOVERY_OVERSHOOT),
+  });
+
+  const result = buildDiscovery({
+    seedArtistName: detail.data.name,
     similar: contributors,
     constraints,
+    // The seed is already excluded upstream, but a similarity provider that
+    // returns an artist under a second MBID would slip past that, and one
+    // track by the artist you asked to move on from undermines the whole mode.
+    excludeArtistKeys: new Set([detail.data.mbid, detail.data.name]),
   });
+
   return persist(input.playlistId, result, warnings);
 }
 
@@ -245,10 +479,46 @@ async function findSimilarArtists(
 ): Promise<ScoredArtistRef[]> {
   const merged = new Map<string, ScoredArtistRef>();
 
+  /**
+   * Keyed on the artist's name rather than their MBID, because ListenBrainz
+   * returns MBIDs and Deezer does not. Keying on `mbid ?? name` filed the same
+   * artist under two keys, and since the engine's per-artist cap works on
+   * those keys, both copies survived it — which is how a playlist limited to
+   * one track per artist ended up with The Strokes twice.
+   */
+  const identity = (ref: { name: string }) =>
+    normalizeArtistName(ref.name) || ref.name.trim().toLowerCase();
+
+  const seedKey = identity(artist);
+
+  const absorb = (neighbours: readonly ScoredArtistRef[], discount = 1) => {
+    for (const neighbour of neighbours) {
+      const key = identity(neighbour);
+      if (!key || key === seedKey) continue;
+
+      const score = neighbour.score * discount;
+      const existing = merged.get(key);
+      if (!existing) {
+        merged.set(key, { ...neighbour, score });
+        continue;
+      }
+
+      // Keep the stronger claim, but never drop an MBID on the floor: the
+      // genre cross-check and the second-degree walk both need one.
+      merged.set(key, {
+        ...existing,
+        mbid: existing.mbid ?? neighbour.mbid,
+        score: Math.max(existing.score, score),
+      });
+    }
+  };
+
+  const askFor = Math.max(100, limit * 3);
+
   for (const provider of similarityProviders) {
     if (merged.size >= limit * 6) break;
     try {
-      const result = await provider.getSimilarArtists(artist, 100);
+      const result = await provider.getSimilarArtists(artist, askFor);
       if (artist.mbid) {
         const artistId = upsertArtist({ mbid: artist.mbid, name: artist.name });
         saveSimilarArtists(
@@ -259,49 +529,99 @@ async function findSimilarArtists(
           undefined,
         );
       }
-      for (const neighbour of result.data) {
-        const key = (neighbour.mbid ?? neighbour.name).toLowerCase();
-        const existing = merged.get(key);
-        if (!existing || neighbour.score > existing.score) {
-          merged.set(key, neighbour);
-        }
-      }
+      absorb(result.data);
     } catch {
       // A similarity source with no SLA failing is expected; the next one, or
       // an empty list, is a valid outcome.
     }
   }
 
+  // ListenBrainz returns about a hundred neighbours per artist, which is short
+  // of what a long playlist needs at one or two tracks each. Neighbours of the
+  // nearest neighbours still sound like the seed and cost one cached call
+  // apiece, so the graph is walked one step further rather than the playlist
+  // being cut short. They arrive discounted: two steps out is a weaker claim
+  // than one, and the ordering has to say so.
+  if (merged.size < limit * 2) {
+    const nearest = [...merged.values()]
+      .sort((a, b) => b.score - a.score)
+      .filter((candidate) => candidate.mbid)
+      .slice(0, SECOND_DEGREE_SEEDS);
+
+    for (const [index, near] of nearest.entries()) {
+      if (merged.size >= limit * 3) break;
+      ctx.progress(index, nearest.length, `Looking beyond ${near.name}…`);
+      try {
+        const result = await similarityProviders[0].getSimilarArtists(
+          { mbid: near.mbid, name: near.name },
+          askFor,
+        );
+        absorb(result.data, near.score * SECOND_DEGREE_DISCOUNT);
+      } catch {
+        // Same no-SLA reasoning as above.
+      }
+    }
+  }
+
   const ranked = [...merged.values()].sort((a, b) => b.score - a.score);
   if (ranked.length === 0) return [];
 
-  // Genre-check the strongest candidates. Capped because each lookup costs a
-  // MusicBrainz request at 1/s; the rest keep their raw similarity, which only
-  // matters if the checked set turns out too thin to fill the playlist.
-  const CHECK_LIMIT = 24;
-  const toCheck = ranked.slice(0, CHECK_LIMIT).filter((a) => a.mbid);
+  // Genre-check the strongest candidates: co-listening similarity answers "who
+  // else do these listeners play?", not "who sounds like this?". Capped because
+  // each lookup costs a MusicBrainz request at 1/s.
+  const checkLimit = Math.min(
+    MAX_GENRE_CHECKS,
+    Math.max(24, Math.ceil(limit * 1.5)),
+  );
+  const toCheck = ranked.slice(0, checkLimit).filter((a) => a.mbid);
 
   const rescored: ScoredArtistRef[] = [];
+  const factors: number[] = [];
+
   for (const [index, candidate] of toCheck.entries()) {
     ctx.progress(index, toCheck.length, `Checking ${candidate.name}…`);
     try {
       const detail = await catalog.getArtist(candidate.mbid as string);
       const overlap = detail ? tagOverlap(seedTags, detail.data.tags) : 0;
-      rescored.push({
-        ...candidate,
-        score: blendedSimilarity(candidate.score, overlap, band),
-      });
+      const score = blendedSimilarity(candidate.score, overlap, band);
+      if (candidate.score > 0) factors.push(score / candidate.score);
+      rescored.push({ ...candidate, score });
       if (detail) rememberArtist({ ...detail.data, tags: detail.data.tags });
     } catch {
       rescored.push(candidate);
     }
   }
 
-  const pool = rescored.length >= limit ? rescored : ranked;
-  pool.sort((a, b) => b.score - a.score);
+  if (rescored.length === 0) return selectByDepth(ranked, band, limit);
+
+  // Candidates past the check budget keep their raw similarity, which is on a
+  // different scale — the genre cross-check only ever lowers a score, so an
+  // unchecked artist would outrank every verified one. Shrinking them by the
+  // average penalty measured on this seed's own neighbours puts both groups
+  // back on one scale, and leaves a checked artist who genuinely diverges from
+  // the seed's genre below an unchecked one, which is the correct outcome.
+  const checked = new Set(rescored.map((a) => (a.mbid ?? a.name).toLowerCase()));
+  const meanFactor =
+    factors.length > 0 ? factors.reduce((a, b) => a + b, 0) / factors.length : 1;
+
+  const pool = [
+    ...rescored,
+    ...ranked
+      .filter((a) => !checked.has((a.mbid ?? a.name).toLowerCase()))
+      .map((a) => ({ ...a, score: a.score * meanFactor })),
+  ].sort((a, b) => b.score - a.score);
 
   return selectByDepth(pool, band, limit);
 }
+
+/** How many near neighbours to expand from when the first-degree pool is thin. */
+const SECOND_DEGREE_SEEDS = 6;
+
+/** Two steps out is a weaker claim than one, and scores have to reflect that. */
+const SECOND_DEGREE_DISCOUNT = 0.7;
+
+/** MusicBrainz genre lookups per generation — 1/s, so this is ~a minute. */
+const MAX_GENRE_CHECKS = 55;
 
 // --- Style playlists -----------------------------------------------------
 
@@ -323,30 +643,45 @@ export async function runStyle(
 
   ctx.progress(0, 10, "Finding artists…");
 
+  // Sized from the request: a 200-track playlist at two per artist needs a
+  // hundred artists that survive resolution and filtering, where the fixed 60
+  // this used to fetch could not even supply half of that.
+  const needed = artistsNeededFor(
+    input.constraints.targetLength,
+    input.constraints.maxPerArtist,
+  );
+  const perTag = Math.min(
+    400,
+    Math.max(60, Math.ceil((needed * 2.5) / seeds.length)),
+  );
+
   const artistsByKey = new Map<string, EngineArtist>();
 
   for (const [index, seed] of seeds.entries()) {
     ctx.progress(index, seeds.length + 6, `Finding ${seed.tag} artists…`);
 
-    const found = await tags.getArtistsForTag(seed.tag, 60);
+    const found = await tags.getArtistsForTag(seed.tag, perTag);
     for (const artist of found.data) {
       addArtist(artistsByKey, artist, seed.tag, seed.weight);
     }
 
     // A thin tag gets widened with its nearest neighbours, discounted so the
     // original request still dominates the result.
-    if (found.data.length < THIN_TAG_THRESHOLD) {
+    if (found.data.length < Math.max(THIN_TAG_THRESHOLD, perTag * 0.5)) {
       try {
         const related = await tags.getSimilarTags(seed.tag, 4);
         for (const neighbour of related.data.slice(0, 3)) {
-          const extra = await tags.getArtistsForTag(neighbour.tag, 40);
+          const extra = await tags.getArtistsForTag(
+            neighbour.tag,
+            Math.ceil(perTag * 0.7),
+          );
           for (const artist of extra.data) {
             addArtist(artistsByKey, artist, seed.tag, seed.weight * 0.5);
           }
         }
         if (related.data.length > 0) {
           warnings.push(
-            `"${seed.tag}" is a narrow tag, so closely related styles were included too.`,
+            `Not enough artists are tagged "${seed.tag}" to fill a playlist this long, so closely related styles were included too.`,
           );
         }
       } catch {
@@ -365,13 +700,15 @@ export async function runStyle(
 
   // Only load tracks for artists likely to be used: each lookup is several
   // rate-limited calls, and loading the whole pool would take minutes.
-  const needed = Math.min(
-    candidates.length,
-    Math.ceil((input.constraints.targetLength / input.constraints.maxPerArtist) * 2),
-  );
   const shortlist = candidates
     .sort((a, b) => scoreOf(b, seeds) - scoreOf(a, seeds))
-    .slice(0, needed);
+    .slice(0, Math.min(candidates.length, MAX_SHORTLIST, Math.ceil(needed * 2.2)));
+
+  // Loading stops as soon as the pool could fill the playlist with room to
+  // spare, so a well-resolving shortlist costs a fraction of its full length.
+  const capacityTarget = Math.ceil(input.constraints.targetLength * POOL_HEADROOM);
+  const loaded: EngineArtist[] = [];
+  let capacity = 0;
 
   for (const [index, artist] of shortlist.entries()) {
     ctx.progress(
@@ -383,6 +720,14 @@ export async function runStyle(
     const ref: ArtistRef = { mbid: artist.mbid, name: artist.name };
     const pool = await loadTopTracks(ref, artist.key, 25);
     artist.tracks = pool.tracks;
+
+    if (pool.tracks.length > 0) {
+      loaded.push(artist);
+      const usable = pool.tracks.filter((track) =>
+        passesFilters(track, input.constraints),
+      );
+      capacity += Math.min(input.constraints.maxPerArtist, usable.length);
+    }
 
     if (pool.ranked && popularity) {
       const artistPopularity = await popularity.getArtistPopularity(ref).catch(() => null);
@@ -401,6 +746,8 @@ export async function runStyle(
         }
       }
     }
+
+    if (capacity >= capacityTarget) break;
   }
 
   ctx.progress(
@@ -411,7 +758,7 @@ export async function runStyle(
 
   const result = generateStylePlaylist({
     seeds,
-    artists: shortlist.filter((artist) => artist.tracks.length > 0),
+    artists: loaded,
     constraints: input.constraints,
   });
 

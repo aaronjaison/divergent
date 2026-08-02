@@ -4,10 +4,20 @@ Playlists built around music, not habits.
 
 Most recommendation engines circle back to the artists you already play.
 Divergent starts from the sound instead — a genre, a style, a mood — and caps
-how often any one artist can appear. It also introduces you to a single artist
-properly: their best-known tracks, their deep cuts, or a blend that places them
-among artists who share their sound.
+how often any one artist can appear.
 
+Three ways in:
+
+- **Build by style** (`/builder`) — pick genres, styles or moods and get a
+  playlist assembled from artists who fit, with a hard cap on repeats.
+- **Introduce me** (`/introduce`) — meet one artist properly: their best-known
+  tracks, their deep cuts in release order, or a blend that places them among
+  artists who share their sound.
+- **Discover similar artists** (`/discover`) — name an artist you love and get a
+  playlist of everyone *else* who sounds like them, one track each. The artist
+  you named never appears; the point is how many new ones you meet.
+
+Playlists run up to 200 tracks, which is the largest a Soundiiz handoff accepts.
 Every playlist exports to Spotify, Apple Music, YouTube Music and 40+ other
 services, or downloads as CSV, M3U or plain text.
 
@@ -68,6 +78,47 @@ replaced without touching generation logic.
 **MusicBrainz IDs are the canonical spine.** Artists, releases and recordings
 are keyed by MBID, with ISRCs stored on recordings for cross-platform matching.
 Everything else — Deezer ids, Spotify ids — hangs off that.
+
+### Playlist length and pool sizing
+
+Playlists go up to `MAX_PLAYLIST_LENGTH` (200), set by Soundiiz's import
+endpoint — building more would produce a playlist that cannot reach the service
+it was made for.
+
+The hard part of a long playlist is not the cap but filling it. Every pool is
+therefore sized from the request rather than fixed, and deliberately overshoots,
+because a meaningful share of any shortlist yields nothing once the popularity
+provider fails to resolve an artist, title filters run, and cross-artist dedupe
+happens. `artistsNeededFor` and the constants beside it in
+`src/lib/services/playlistService.ts` are where that arithmetic lives.
+
+Two consequences worth knowing:
+
+- **Loading stops early.** Once the pool could fill the playlist `POOL_HEADROOM`
+  times over, the service stops resolving artists. A well-resolving shortlist
+  costs a fraction of its full length.
+- **Discovery over-fetches on purpose.** The obscurity band works by pushing
+  well-known artists down the order, which only removes anyone if there are more
+  candidates than seats — hence `DISCOVERY_OVERSHOOT`.
+
+Where a mode genuinely cannot reach the requested length — Radiohead has around
+36 real deep cuts, not 80 — the playlist is marked `partial` and says so rather
+than padding.
+
+### Why discovery bands on fame, not just similarity
+
+Co-listening similarity answers "who else do these listeners play?", not "who
+sounds like this?". Asked who is similar to Radiohead it truthfully returns Pink
+Floyd, the Beatles and Led Zeppelin — all correct, and all useless to someone
+looking for something new.
+
+Two corrections handle this, and both are needed:
+
+1. `blendedSimilarity` in `src/lib/engine/scoring.ts` weights raw similarity by
+   genre overlap, so co-listening artefacts from a different genre fall away.
+2. `buildDiscovery` bands on audience size, computed **within the candidate
+   pool**. How famous an artist is relative to the others who sound like this
+   one is the only comparison that means anything.
 
 ### Why a single long-lived process
 

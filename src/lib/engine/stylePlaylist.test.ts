@@ -111,6 +111,35 @@ describe("generateStylePlaylist", () => {
     expect(result.warnings.join(" ")).toMatch(/of 25 tracks|per artist/);
   });
 
+  it("fills a 200-track request from a pool that can supply it", () => {
+    const result = generateStylePlaylist({
+      seeds: shoegaze,
+      // 120 artists at two apiece is 240 slots for a 200-track playlist.
+      artists: pool(120, "shoegaze"),
+      constraints: constraints({ targetLength: 200, maxPerArtist: 2 }),
+    });
+
+    expect(result.tracks).toHaveLength(200);
+    expect(result.warnings).toHaveLength(0);
+    for (const count of countByArtist(result.tracks).values()) {
+      expect(count).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it("keeps a long playlist as varied as a short one", () => {
+    const long = generateStylePlaylist({
+      seeds: shoegaze,
+      artists: pool(150, "shoegaze"),
+      constraints: constraints({ targetLength: 200, maxPerArtist: 2 }),
+    });
+
+    // The anti-repetition promise cannot quietly weaken as length grows.
+    expect(artistDiversity(long.tracks)).toBeGreaterThanOrEqual(0.5);
+    for (let i = 1; i < long.tracks.length; i++) {
+      expect(long.tracks[i].artistKey).not.toBe(long.tracks[i - 1].artistKey);
+    }
+  });
+
   it("returns a clear warning when nothing matches the seeds", () => {
     const result = generateStylePlaylist({
       seeds: [{ tag: "vaporwave", weight: 1 }],

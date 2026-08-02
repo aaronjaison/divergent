@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { LengthPicker } from "./LengthPicker";
 import { ObscurityPicker } from "./ObscurityPicker";
 import { TagPicker } from "./TagPicker";
 import type { ObscurityBand } from "@/lib/engine/types";
@@ -74,21 +75,7 @@ export function BuilderForm() {
           <ObscurityPicker value={obscurity} onChange={setObscurity} />
 
           <div className="grid gap-6 sm:grid-cols-2">
-            <div>
-              <label htmlFor="length" className="block text-sm font-medium">
-                Length: {length} tracks
-              </label>
-              <input
-                id="length"
-                type="range"
-                min={10}
-                max={50}
-                step={5}
-                value={length}
-                onChange={(event) => setLength(Number(event.target.value))}
-                className="mt-2 w-full accent-[var(--accent)]"
-              />
-            </div>
+            <LengthPicker value={length} onChange={setLength} />
 
             <div>
               <label htmlFor="max-per-artist" className="block text-sm font-medium">

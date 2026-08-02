@@ -1,5 +1,10 @@
 import { capPerArtist, relaxToFill } from "./diversity";
-import { interleave, separateAdjacent, type Queue } from "./interleave";
+import {
+  interleave,
+  roundRobinByKey,
+  separateAdjacent,
+  type Queue,
+} from "./interleave";
 import { bandAffinity, percentileRanks, selectTracksForBand } from "./obscurity";
 import { createRng, weightedSampleWithoutReplacement } from "./random";
 import { dedupeTracks, passesFilters } from "./titleFilters";
@@ -119,10 +124,12 @@ export function generateStylePlaylist(
     reserves.push(...usable.filter((track) => !picked.includes(track)));
   }
 
-  // Shuffle within each queue so artist order isn't just sampling order.
   for (const queue of queues.values()) {
-    queue.items = dedupeTracks(queue.items);
-    queue.items = capPerArtist(queue.items, constraints.maxPerArtist);
+    queue.items = capPerArtist(dedupeTracks(queue.items), constraints.maxPerArtist);
+    // Each artist's picks were appended together above. Rotating them apart
+    // here rather than leaving it to the repair pass is what keeps a 200-track
+    // playlist as varied as a 25-track one — see roundRobinByKey.
+    queue.items = roundRobinByKey(queue.items, (track) => track.artistKey);
   }
 
   const merged = interleave([...queues.values()], { maxRun: 3, rng });

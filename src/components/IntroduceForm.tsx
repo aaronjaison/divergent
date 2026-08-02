@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArtistSearch, type ArtistResult } from "./ArtistSearch";
+import { LengthPicker } from "./LengthPicker";
 import { ObscurityPicker } from "./ObscurityPicker";
 import type { ObscurityBand } from "@/lib/engine/types";
 
@@ -108,21 +109,11 @@ export function IntroduceForm() {
             <ObscurityPicker value={obscurity} onChange={setObscurity} />
           )}
 
-          <div>
-            <label htmlFor="length" className="block text-sm font-medium">
-              Playlist length: {length} tracks
-            </label>
-            <input
-              id="length"
-              type="range"
-              min={10}
-              max={50}
-              step={5}
-              value={length}
-              onChange={(event) => setLength(Number(event.target.value))}
-              className="mt-2 w-full accent-[var(--accent)]"
-            />
-          </div>
+          <LengthPicker
+            value={length}
+            onChange={setLength}
+            label="Playlist length"
+          />
 
           <div>
             <button

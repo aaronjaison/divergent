@@ -2,13 +2,18 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createPlaylist } from "@/lib/db/repo/playlists";
 import { seedFromString } from "@/lib/engine/random";
-import { DEFAULT_CONSTRAINTS } from "@/lib/engine/types";
+import { DEFAULT_CONSTRAINTS, MAX_PLAYLIST_LENGTH } from "@/lib/engine/types";
 import { getOrCreateSessionId } from "@/lib/session/anonSession";
 import { startJob, TooManyJobsError } from "@/lib/services/generationJobs";
-import { runIntroduce, runStyle } from "@/lib/services/playlistService";
+import { runDiscover, runIntroduce, runStyle } from "@/lib/services/playlistService";
 
 const constraintsSchema = z.object({
-  targetLength: z.number().int().min(5).max(100).default(DEFAULT_CONSTRAINTS.targetLength),
+  targetLength: z
+    .number()
+    .int()
+    .min(5)
+    .max(MAX_PLAYLIST_LENGTH)
+    .default(DEFAULT_CONSTRAINTS.targetLength),
   maxPerArtist: z.number().int().min(1).max(5).default(DEFAULT_CONSTRAINTS.maxPerArtist),
   obscurity: z.enum(["easy", "medium", "hard"]).default(DEFAULT_CONSTRAINTS.obscurity),
   eraFrom: z.number().int().min(1900).max(2100).optional(),
@@ -34,7 +39,18 @@ const introduceSchema = z.object({
   constraints: constraintsSchema.optional(),
 });
 
-const bodySchema = z.discriminatedUnion("mode", [styleSchema, introduceSchema]);
+const discoverSchema = z.object({
+  mode: z.literal("discover"),
+  artistMbid: z.string().uuid(),
+  artistName: z.string().min(1).max(200),
+  constraints: constraintsSchema.optional(),
+});
+
+const bodySchema = z.discriminatedUnion("mode", [
+  styleSchema,
+  introduceSchema,
+  discoverSchema,
+]);
 
 const SUBMODE_KIND = {
   famous: "introduce_famous",
@@ -82,7 +98,16 @@ export async function POST(request: Request) {
   const title =
     body.mode === "style"
       ? body.tags.map((t) => t.tag).join(" + ")
-      : SUBMODE_TITLE[body.submode](body.artistName);
+      : body.mode === "discover"
+        ? `Artists like ${body.artistName}`
+        : SUBMODE_TITLE[body.submode](body.artistName);
+
+  const kind =
+    body.mode === "style"
+      ? "style"
+      : body.mode === "discover"
+        ? "discover_artists"
+        : SUBMODE_KIND[body.submode];
 
   const seed = seedFromString(
     `${title}|${Date.now()}|${constraintValues.obscurity}`,
@@ -91,7 +116,7 @@ export async function POST(request: Request) {
 
   const playlistId = createPlaylist({
     sessionId,
-    kind: body.mode === "style" ? "style" : SUBMODE_KIND[body.submode],
+    kind,
     title,
     params: { ...body, constraints },
   });
@@ -99,20 +124,32 @@ export async function POST(request: Request) {
   try {
     // Deliberately not awaited: a cold generation makes dozens of rate-limited
     // calls. The client polls GET /api/playlists/[id] instead.
-    void startJob(playlistId, (ctx) =>
-      body.mode === "style"
-        ? runStyle({ playlistId, seeds: body.tags, constraints }, ctx)
-        : runIntroduce(
-            {
-              playlistId,
-              artistMbid: body.artistMbid,
-              artistName: body.artistName,
-              submode: body.submode,
-              constraints,
-            },
-            ctx,
-          ),
-    );
+    void startJob(playlistId, (ctx) => {
+      if (body.mode === "style") {
+        return runStyle({ playlistId, seeds: body.tags, constraints }, ctx);
+      }
+      if (body.mode === "discover") {
+        return runDiscover(
+          {
+            playlistId,
+            artistMbid: body.artistMbid,
+            artistName: body.artistName,
+            constraints,
+          },
+          ctx,
+        );
+      }
+      return runIntroduce(
+        {
+          playlistId,
+          artistMbid: body.artistMbid,
+          artistName: body.artistName,
+          submode: body.submode,
+          constraints,
+        },
+        ctx,
+      );
+    });
   } catch (error) {
     if (error instanceof TooManyJobsError) {
       return NextResponse.json({ error: error.message }, { status: 429 });

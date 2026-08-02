@@ -48,15 +48,29 @@ export function relaxToFill(
   reserves: readonly EngineTrack[],
   targetLength: number,
   maxPerArtist: number,
+  /**
+   * How far above `maxPerArtist` the cap may go. Zero means fill only within
+   * the cap — used where the caller has made the cap a promise rather than a
+   * preference, such as a blend, where exceeding it turns "and friends" back
+   * into the single-artist playlist the listener was trying to escape.
+   */
+  maxRelaxation = 2,
 ): { tracks: EngineTrack[]; relaxedTo: number } {
   const tracks = selected.slice();
-  let cap = maxPerArtist;
-
   const chosen = new Set(tracks.map((t) => t.key));
   const remaining = reserves.filter((t) => !chosen.has(t.key));
 
-  while (tracks.length < targetLength && cap < maxPerArtist + 2) {
-    cap++;
+  let cap = maxPerArtist;
+  /** The highest cap that actually contributed a track, so the caller only
+   * reports a relaxation that really happened. */
+  let usedCap = maxPerArtist;
+
+  // The first pass runs at the caller's own cap, not above it. Callers often
+  // allocate fewer tracks per artist than the cap permits — a blend spreading
+  // 65 slots over 50 artists gives nearly all of them one — so there is
+  // usually room left inside the promise before any of it needs breaking.
+  while (tracks.length < targetLength) {
+    const before = tracks.length;
     const counts = countByArtist(tracks);
 
     for (const track of remaining) {
@@ -69,7 +83,11 @@ export function relaxToFill(
       chosen.add(track.key);
       tracks.push(track);
     }
+
+    if (tracks.length > before) usedCap = cap;
+    if (tracks.length >= targetLength || cap >= maxPerArtist + maxRelaxation) break;
+    cap++;
   }
 
-  return { tracks, relaxedTo: cap };
+  return { tracks, relaxedTo: usedCap };
 }

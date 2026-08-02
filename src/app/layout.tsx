@@ -42,6 +42,9 @@ export default function RootLayout({
               <Link href="/introduce" className="hover:text-foreground">
                 Introduce me
               </Link>
+              <Link href="/discover" className="hover:text-foreground">
+                Similar artists
+              </Link>
             </div>
           </nav>
         </header>
