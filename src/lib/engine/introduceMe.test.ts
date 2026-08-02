@@ -289,6 +289,42 @@ describe("buildBlend", () => {
     expect(warnings.join(" ")).toMatch(/No similar artists/i);
   });
 
+  it("reaches the requested length when the seed has a deep catalogue", () => {
+    const deep = makeArtist("Bjork", { trackCount: 120, popularity: 70 });
+    const many = Array.from({ length: 90 }, (_, i) => ({
+      artist: makeArtist(`Similar ${i}`, { trackCount: 10 }),
+      score: 0.9 - i * 0.005,
+    }));
+
+    const { tracks, warnings } = buildBlend({
+      seedArtist: deep,
+      similar: many,
+      constraints: constraints({ targetLength: 200, maxPerArtist: 2, obscurity: "hard" }),
+    });
+
+    expect(tracks).toHaveLength(200);
+    expect(warnings).toHaveLength(0);
+  });
+
+  it("hands the seed's unused slots to the neighbours", () => {
+    // Twelve tracks cannot cover 35% of a 100-track playlist. The neighbours
+    // should absorb the difference rather than the playlist coming up short.
+    const thin = makeArtist("Bjork", { trackCount: 12, popularity: 70 });
+    const many = Array.from({ length: 60 }, (_, i) => ({
+      artist: makeArtist(`Similar ${i}`, { trackCount: 10 }),
+      score: 0.9 - i * 0.01,
+    }));
+
+    const { tracks } = buildBlend({
+      seedArtist: thin,
+      similar: many,
+      constraints: constraints({ targetLength: 100, maxPerArtist: 2 }),
+    });
+
+    expect(tracks).toHaveLength(100);
+    expect(countByArtist(tracks).get("Bjork")).toBeLessThanOrEqual(12);
+  });
+
   it("respects maxPerArtist across the whole blend", () => {
     const { tracks } = buildBlend({
       seedArtist: discography,

@@ -143,4 +143,50 @@ describe("selectTracksForBand", () => {
       expect(selectTracksForBand(tracks, band, 2).length).toBeLessThanOrEqual(2);
     }
   });
+
+  it("widens past the band rather than returning short", () => {
+    // 'hard' is the bottom 40% of the catalogue, so a request for 8 of these
+    // 10 tracks cannot be answered from inside the band. Coming up 4 short
+    // reads as "we could not find your music" when the truth is "you asked for
+    // more than that slice holds".
+    const big = Array.from({ length: 100 }, (_, i) =>
+      makeTrack("artist", `Song ${i + 1}`, { popularity: 100 - i }),
+    );
+
+    for (const band of ["easy", "medium", "hard"] as const) {
+      expect(selectTracksForBand(big, band, 80)).toHaveLength(80);
+    }
+  });
+
+  it("keeps the band's own tracks when it has to widen", () => {
+    const big = Array.from({ length: 100 }, (_, i) =>
+      makeTrack("artist", `Song ${i + 1}`, { popularity: 100 - i }),
+    );
+
+    const picked = selectTracksForBand(big, "hard", 80);
+    // Every track from inside the band survives; the extras come from outside.
+    const inBand = big.slice(60);
+    for (const track of inBand) {
+      expect(picked).toContain(track);
+    }
+  });
+
+  it("widens downward from easy and upward from hard", () => {
+    const big = Array.from({ length: 100 }, (_, i) =>
+      makeTrack("artist", `Song ${i + 1}`, { popularity: 100 - i }),
+    );
+
+    const hard = selectTracksForBand(big, "hard", 60);
+    const easy = selectTracksForBand(big, "easy", 60);
+
+    const mean = (list: typeof big) =>
+      list.reduce((sum, t) => sum + (t.popularity ?? 0), 0) / list.length;
+
+    // Even widened, the bands still mean opposite things.
+    expect(mean(hard)).toBeLessThan(mean(easy));
+  });
+
+  it("still cannot invent tracks that do not exist", () => {
+    expect(selectTracksForBand(tracks, "hard", 500)).toHaveLength(10);
+  });
 });

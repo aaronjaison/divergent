@@ -263,11 +263,12 @@ export async function runIntroduce(
   // that the popularity provider cannot resolve comes straight off the end of
   // the playlist. loadContributors stops early once it has enough, so the
   // margin costs nothing when the artists do resolve.
+  //
+  // Sized against the WHOLE playlist rather than the neighbours' nominal share,
+  // because buildBlend hands the seed's unused slots to the neighbours when the
+  // seed artist has too small a catalogue to fill its own share.
   const neighboursWanted = Math.ceil(
-    artistsNeededFor(
-      Math.ceil(constraints.targetLength * (1 - SEED_SHARE)),
-      constraints.maxPerArtist,
-    ) * 1.5,
+    artistsNeededFor(constraints.targetLength, constraints.maxPerArtist) * 1.5,
   );
 
   const similar = await findSimilarArtists(
@@ -292,13 +293,21 @@ export async function runIntroduce(
     ? seedPool.tracks
     : (await loadCatalogTracks(artistMbid, artistKey, 4)).tracks;
 
+  // What the seed can really contribute, which is what the neighbours have to
+  // make up the difference on. Counted here rather than assumed from
+  // SEED_SHARE, so an artist with a thin catalogue widens the neighbour search
+  // instead of shortening the playlist.
+  const seedUsable = engineArtist.tracks.filter((track) =>
+    passesFilters(track, constraints),
+  ).length;
+
   const contributors = await loadContributors(similar, constraints, ctx, {
     label: (name) => `Adding ${name}…`,
-    // Neighbours only fill the non-seed slots, so stop counting against those
+    // Neighbours only fill the slots the seed leaves, so count against those
     // rather than against the whole playlist — otherwise the loop never
     // reaches its target and the early stop never fires.
     capacityTarget: Math.ceil(
-      constraints.targetLength * (1 - SEED_SHARE) * POOL_HEADROOM,
+      (constraints.targetLength - Math.min(seedWanted, seedUsable)) * POOL_HEADROOM,
     ),
   });
 
@@ -340,6 +349,7 @@ async function loadContributors(
     options.capacityTarget ?? Math.ceil(constraints.targetLength * POOL_HEADROOM);
 
   const contributors: { artist: EngineArtist; score: number }[] = [];
+  const loadedArtists = new Set<string>();
   let capacity = 0;
 
   for (const [index, neighbour] of similar.entries()) {
@@ -349,6 +359,18 @@ async function loadContributors(
     const key = neighbour.mbid ?? neighbour.name;
     const pool = await loadTopTracks(ref, key, 25);
     if (pool.tracks.length === 0) continue;
+
+    /**
+     * Deduplicated on the name the popularity provider came back with, not the
+     * one we asked about. Two similarity entries can carry different names and
+     * still resolve to the same artist — "Bob Dylan" and "Bob Dylan & The
+     * Band" both match Bob Dylan above the fuzzy threshold — and since the
+     * per-artist cap works on our keys, both copies survived it and one artist
+     * appeared three times in a playlist capped at two.
+     */
+    const resolved = normalizeArtistName(pool.tracks[0].artistNames[0] ?? neighbour.name);
+    if (resolved && loadedArtists.has(resolved)) continue;
+    if (resolved) loadedArtists.add(resolved);
 
     const artistPopularity = options.withPopularity
       ? await popularity?.getArtistPopularity(ref).catch(() => null)

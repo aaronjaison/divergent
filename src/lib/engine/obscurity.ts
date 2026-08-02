@@ -137,26 +137,57 @@ export function selectTracksForBand(
     .slice()
     .sort((a, b) => (b.popularity ?? 0) - (a.popularity ?? 0));
 
-  let slice: EngineTrack[];
+  // The band as a window onto the popularity-ordered catalogue.
+  let start: number;
+  let end: number;
   switch (band) {
     case "easy":
-      slice = sorted.slice(0, Math.max(count, Math.ceil(sorted.length * 0.34)));
+      start = 0;
+      end = Math.max(count, Math.ceil(sorted.length * 0.34));
       break;
-    case "medium": {
-      const start = Math.floor(sorted.length * 0.25);
-      const end = Math.max(start + count, Math.ceil(sorted.length * 0.75));
-      slice = sorted.slice(start, end);
-      // Medium tolerates unknown popularity; it makes no fame claim either way.
-      if (slice.length < count) slice = slice.concat(unranked);
+    case "medium":
+      start = Math.floor(sorted.length * 0.25);
+      end = Math.max(start + count, Math.ceil(sorted.length * 0.75));
       break;
-    }
-    case "hard": {
-      const start = Math.floor(sorted.length * 0.6);
-      slice = sorted.slice(start);
+    case "hard":
+      start = Math.floor(sorted.length * 0.6);
+      end = sorted.length;
       break;
-    }
   }
 
-  if (slice.length === 0) slice = sorted;
-  return slice.slice(0, count);
+  const picked = sorted.slice(start, end);
+  if (picked.length >= count) return picked.slice(0, count);
+
+  /**
+   * The window is a FRACTION of the catalogue, so on its own it cannot answer
+   * a request larger than that fraction: 'hard' offers the bottom 40%, which
+   * means asking for 70 tracks from a 98-track catalogue returned 39 and the
+   * playlist came up short. That reads to the listener as "we could not find
+   * enough music" when the truth is "you asked for more than this slice
+   * holds".
+   *
+   * So the window widens outward from its own edges instead, nearest first.
+   * The band still decides what comes first and therefore what survives being
+   * trimmed to length; it just stops being a hard boundary once the request
+   * outgrows it.
+   */
+  const out = picked.slice();
+  const above = sorted.slice(0, start).reverse();
+  const below = sorted.slice(end);
+
+  let a = 0;
+  let b = 0;
+  while (out.length < count && (a < below.length || b < above.length)) {
+    // Outward past the obscure edge first: a band that ran out is still a
+    // request for less-familiar music, and what lies below it honours that
+    // better than the hits sitting above.
+    if (a < below.length) out.push(below[a++]);
+    if (out.length < count && b < above.length) out.push(above[b++]);
+  }
+
+  // Medium makes no claim about fame in either direction, so a track of
+  // unknown popularity is legitimate filler there and nowhere else.
+  if (out.length < count && band === "medium") out.push(...unranked);
+
+  return out.slice(0, count);
 }

@@ -196,13 +196,19 @@ export function buildBlend(input: BlendInput): GeneratedPlaylist {
   const warnings: string[] = [];
 
   const seedSlots = Math.max(1, Math.round(constraints.targetLength * seedShare));
-  const otherSlots = Math.max(0, constraints.targetLength - seedSlots);
 
   const seedTracks = selectTracksForBand(
     dedupeTracks(seedArtist.tracks.filter((t) => passesFilters(t, constraints))),
     constraints.obscurity,
     seedSlots,
   ).map((track) => ({ ...track, reason: `by ${seedArtist.name}` }));
+
+  // Sized from what the seed actually supplied, not from what it was offered.
+  // An artist with a thin catalogue cannot fill 35% of a 200-track playlist,
+  // and the honest response is to hand those slots to the neighbours — a blend
+  // of 50 seed tracks and 150 others is still a blend, and still the length
+  // that was asked for, where padding the seed or stopping short is neither.
+  const otherSlots = Math.max(0, constraints.targetLength - seedTracks.length);
 
   const contributors = similar
     .filter((entry) => entry.score > 0 && entry.artist.tracks.length > 0)
