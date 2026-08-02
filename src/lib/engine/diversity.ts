@@ -49,7 +49,7 @@ export function relaxToFill(
   targetLength: number,
   maxPerArtist: number,
 ): { tracks: EngineTrack[]; relaxedTo: number } {
-  let tracks = selected.slice();
+  const tracks = selected.slice();
   let cap = maxPerArtist;
 
   const chosen = new Set(tracks.map((t) => t.key));

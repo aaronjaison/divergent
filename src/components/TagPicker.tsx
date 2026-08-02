@@ -21,10 +21,9 @@ export function TagPicker({ selected, onChange, popular = [] }: Props) {
 
   useEffect(() => {
     const term = query.trim();
-    if (term.length < 2) {
-      setSuggestions([]);
-      return;
-    }
+    // Cleared in the change handler instead: setting state synchronously in an
+    // effect cascades an extra render on every keystroke.
+    if (term.length < 2) return;
 
     const handle = setTimeout(async () => {
       const id = ++requestId.current;
@@ -87,7 +86,11 @@ export function TagPicker({ selected, onChange, popular = [] }: Props) {
         id="tag-search"
         type="search"
         value={query}
-        onChange={(event) => setQuery(event.target.value)}
+        onChange={(event) => {
+          const next = event.target.value;
+          setQuery(next);
+          if (next.trim().length < 2) setSuggestions([]);
+        }}
         onKeyDown={(event) => {
           if (event.key === "Enter") {
             event.preventDefault();

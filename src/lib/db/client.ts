@@ -14,7 +14,6 @@ import * as schema from "./schema";
  */
 
 declare global {
-  // eslint-disable-next-line no-var
   var __divergentDb: ReturnType<typeof createDb> | undefined;
 }
 

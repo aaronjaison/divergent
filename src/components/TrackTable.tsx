@@ -1,4 +1,5 @@
 import type { PlaylistTrack } from "@/lib/db/repo/playlists";
+import { TrackLinks } from "./TrackLinks";
 
 function formatDuration(ms: number | null): string {
   if (!ms) return "—";
@@ -43,6 +44,7 @@ export function TrackTable({ tracks }: { tracks: PlaylistTrack[] }) {
                 {track.reason && (
                   <div className="mt-0.5 text-xs text-muted italic">{track.reason}</div>
                 )}
+                <TrackLinks isrc={track.isrc} />
               </td>
               <td className="px-4 py-3 text-muted">
                 {track.album ?? "—"}

@@ -1,6 +1,13 @@
 import Link from "next/link";
+import { listPlaylistsForSession } from "@/lib/db/repo/playlists";
+import { readSessionId } from "@/lib/session/anonSession";
 
-export default function Home() {
+export const dynamic = "force-dynamic";
+
+export default async function Home() {
+  const sessionId = await readSessionId();
+  const recent = sessionId ? listPlaylistsForSession(sessionId, 5) : [];
+
   return (
     <div className="flex flex-col gap-12">
       <section className="max-w-2xl">
@@ -41,6 +48,29 @@ export default function Home() {
           </p>
         </Link>
       </section>
+
+      {recent.length > 0 && (
+        <section>
+          <h2 className="text-sm font-medium uppercase tracking-wide text-muted">
+            Your recent playlists
+          </h2>
+          <ul className="mt-3 divide-y divide-border overflow-hidden rounded-xl border border-border">
+            {recent.map((playlist) => (
+              <li key={playlist.id}>
+                <Link
+                  href={`/playlist/${playlist.id}`}
+                  className="flex items-center justify-between px-4 py-3 transition-colors hover:bg-border/40"
+                >
+                  <span className="font-medium">{playlist.title}</span>
+                  <span className="text-sm text-muted">
+                    {playlist.status === "building" ? "building…" : playlist.status}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="rounded-xl border border-border p-6">
         <h2 className="text-sm font-medium uppercase tracking-wide text-muted">

@@ -36,10 +36,9 @@ export function ArtistSearch({ onSelect, selected }: Props) {
 
   useEffect(() => {
     const term = query.trim();
-    if (term.length < 2) {
-      setResults([]);
-      return;
-    }
+    // Clearing happens in the change handler; an effect that sets state
+    // synchronously would cascade a second render on every keystroke.
+    if (term.length < 2) return;
 
     // Debounced: MusicBrainz allows one request per second, so firing on every
     // keystroke would queue up behind itself and feel broken.
@@ -107,7 +106,14 @@ export function ArtistSearch({ onSelect, selected }: Props) {
         id="artist-search"
         type="search"
         value={query}
-        onChange={(event) => setQuery(event.target.value)}
+        onChange={(event) => {
+          const next = event.target.value;
+          setQuery(next);
+          if (next.trim().length < 2) {
+            setResults([]);
+            setError(null);
+          }
+        }}
         placeholder="Start typing an artist name…"
         autoComplete="off"
         className="mt-2 w-full rounded-lg border border-border bg-surface px-4 py-2.5 outline-none focus:border-accent"
