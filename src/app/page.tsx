@@ -47,9 +47,10 @@ export default async function Home() {
           Playlists for people who have heard their recommendations already
         </p>
         <h1 className="font-display mt-4 text-5xl text-balance sm:text-6xl">
-          Built around the music,
-          <br />
-          not around your habits.
+          Built around the music,{" "}
+          {/* Broken by hand only where there is room for it; on a phone the
+              forced break made a four-line headline out of a two-line one. */}
+          <span className="sm:block">not around your habits.</span>
         </h1>
         <p className="mt-6 max-w-2xl text-lg text-muted text-pretty">
           Most recommendations circle back to the artists you already play.
