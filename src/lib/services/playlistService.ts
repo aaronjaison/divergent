@@ -6,9 +6,18 @@ import { upsertArtist } from "@/lib/db/repo/artists";
 import { saveSimilarArtists } from "@/lib/db/repo/similarity";
 import { saveArtistTags } from "@/lib/db/repo/tags";
 import { savePopularity } from "@/lib/db/repo/recordings";
-import { consensusProfile, type SeedProfile } from "@/lib/engine/consensus";
+import {
+  consensusProfile,
+  matchedSeedCount,
+  type ConsensusProfile,
+  type SeedProfile,
+} from "@/lib/engine/consensus";
 import { selectByDepth } from "@/lib/engine/obscurity";
-import { rankByGenreThenSimilarity, tagCosine } from "@/lib/engine/scoring";
+import {
+  rankByGenreThenSimilarity,
+  tagCosine,
+  tagSpecificity,
+} from "@/lib/engine/scoring";
 import type {
   EngineArtist,
   EngineTrack,
@@ -714,7 +723,15 @@ interface SoundsLikeSeed {
   title: string;
   artistNames: string[];
   artistMbid?: string;
-  /** Empty for an album seed. */
+  /**
+   * For a song, every recording id MusicBrainz has for that ONE song — the
+   * single, the album cut, the reissue — of which the similarity index knows
+   * some and not others. For an album, a sample of its actual tracklist, which
+   * are different songs entirely. `kind` says which, because the two are
+   * queried in opposite ways: alternate ids are tried until one answers, where
+   * an album's tracks are all asked and the answers pooled.
+   */
+  kind: "track" | "album";
   recordingMbids: string[];
   albumMbid?: string;
 }
@@ -734,11 +751,54 @@ const RECORDING_TAG_WEIGHT = 1;
 const ALBUM_TAG_WEIGHT = 0.6;
 const ARTIST_TAG_WEIGHT = 0.35;
 
+/**
+ * Genre tags the song and album layers must supply before the artist layer is
+ * left out of a seed's profile entirely.
+ *
+ * The artist layer is a gap-filler, and on a record that departs from its
+ * author's catalogue it fills the gap with the wrong thing. Lil Yachty's *Let's
+ * Start Here* is tagged psychedelic rock, space rock, neo-psychedelia,
+ * psychedelic soul and art pop; Lil Yachty the artist is tagged, in full, "hip
+ * hop, southern hip hop, trap". Layered in at 0.35 those three land third,
+ * fourth and fifth in a profile whose peak is 0.6 — and once specificity is
+ * applied "southern hip hop" outranks "psychedelic rock", because the umbrella
+ * discount hits the album's tag and not the artist's. The record then recruits
+ * rap for a psychedelic playlist, which is precisely what it did.
+ *
+ * Five is not a fine-tuned number: a record with five genre tags of its own has
+ * already said what it is, and one with fewer usually has not.
+ */
+const OWN_TAGS_ENOUGH = 5;
+
 /** Alternate recording ids profiled per seed song. */
 const RECORDING_IDS_PER_SEED = 6;
 
 /** Neighbouring songs pulled per seed track. */
 const RECORDING_NEIGHBOURS = 60;
+
+/**
+ * Songs sampled from a seed album, spread evenly across the running order.
+ *
+ * An album seed used to have no song channel at all, so the only candidates it
+ * could produce were its artist's neighbours — which is how two psychedelic
+ * records returned a rap playlist. Its own tracklist is the fix, and it is a
+ * far better signal than the artist's: asked about the thirteen recordings on
+ * *Currents*, ListenBrainz knows all thirteen and returns Mac DeMarco, Unknown
+ * Mortal Orchestra, MGMT, Pond, Melody's Echo Chamber and Mild High Club.
+ *
+ * Spread rather than taken from the front because the opening run of a record
+ * is not the record. Five, because coverage is the thing that varies and it
+ * varies by album rather than by track: *Currents* answers on the first song,
+ * *Let's Start Here* on three of fourteen.
+ */
+const ALBUM_TRACK_SAMPLE = 5;
+
+/**
+ * Distinct artists from one album at which its remaining samples are skipped.
+ * A well-known record reaches this on its first song, so the sample size above
+ * is a ceiling paid only by the albums that need it.
+ */
+const ALBUM_ARTISTS_ENOUGH = 40;
 
 /**
  * Below this mean pairwise agreement the seeds are not describing one sound,
@@ -759,6 +819,38 @@ const LOW_AGREEMENT = 0.25;
  */
 const CORROBORATION = 0.6;
 
+/**
+ * Consensus tags searched for artists directly, and how many each returns.
+ *
+ * The third candidate channel, and the only one that does not go through
+ * anybody's listening history. Both of the others answer "who else do these
+ * listeners play?", which is a different question from "what else sounds like
+ * this" and diverges completely on a record whose audience came for its author:
+ * every song on *Let's Start Here* that ListenBrainz knows returns rap, because
+ * the people who played a psychedelic record by a rapper were rap listeners.
+ * Tags are the only evidence that survives that, so a seed the co-listening
+ * data cannot represent is still represented here.
+ *
+ * Ordered by strength × specificity so the calls are spent on "neo-psychedelia"
+ * rather than on "rock", and stopping at four keeps the channel to four
+ * rate-limited requests.
+ */
+const TAG_CHANNEL_TAGS = 4;
+const TAG_CHANNEL_ARTISTS = 60;
+
+/**
+ * What a tag-channel artist is worth on the co-listening axis, where it has no
+ * score at all. Half, so it competes on genre — which is the axis it was
+ * selected on — without being ranked last on an axis it never entered.
+ */
+const TAG_CHANNEL_SIMILARITY = 0.5;
+
+/**
+ * Below this share of the shortlist matching every seed, the playlist is mostly
+ * one-sided matches and should say so.
+ */
+const THIN_FULL_MATCH = 0.25;
+
 function layerTags(
   target: Record<string, number>,
   tags: Readonly<Record<string, number>> | undefined,
@@ -771,26 +863,69 @@ function layerTags(
   }
 }
 
-function toSeeds(input: SoundsLikeInput): SoundsLikeSeed[] {
+/**
+ * An even spread of `count` items across a list, endpoints included.
+ *
+ * Sampling an album's tracks from the front profiles its opening run rather
+ * than the record: a sequenced album puts its singles at 1, 5 and 9, and the
+ * side-two material that says what the thing actually is at the end.
+ */
+function spreadSample<T>(items: readonly T[], count: number): T[] {
+  if (items.length <= count) return [...items];
+  if (count <= 1) return items.length > 0 ? [items[0]] : [];
+
+  const out: T[] = [];
+  for (let i = 0; i < count; i++) {
+    out.push(items[Math.round((i * (items.length - 1)) / (count - 1))]);
+  }
+  return out;
+}
+
+async function toSeeds(
+  input: SoundsLikeInput,
+  ctx: JobContext,
+): Promise<SoundsLikeSeed[]> {
   if (input.seedKind === "tracks") {
     return (input.tracks ?? []).map((track) => ({
       key: track.mbids[0] ?? `${track.title}::${track.artistNames[0] ?? ""}`,
       title: track.title,
       artistNames: track.artistNames,
       artistMbid: track.artistMbid,
+      kind: "track" as const,
       recordingMbids: track.mbids.slice(0, RECORDING_IDS_PER_SEED),
       albumMbid: track.albumMbid,
     }));
   }
 
-  return (input.albums ?? []).map((album) => ({
-    key: album.mbid,
-    title: album.title,
-    artistNames: album.artistNames,
-    artistMbid: album.artistMbid,
-    recordingMbids: [],
-    albumMbid: album.mbid,
-  }));
+  const albums = input.albums ?? [];
+  const seeds: SoundsLikeSeed[] = [];
+
+  for (const [index, album] of albums.entries()) {
+    ctx.progress(index, albums.length + 4, `Reading ${album.title}…`);
+
+    // One browse, cached for months, and it carries every recording id on the
+    // record — the whole reason an album seed can now be asked about itself.
+    // A record with no readable pressing still works, on its tags alone.
+    const tracks = await catalog
+      .getAlbumTracks({ mbid: album.mbid, title: album.title })
+      .then((result) => result.data)
+      .catch(() => []);
+
+    seeds.push({
+      key: album.mbid,
+      title: album.title,
+      artistNames: album.artistNames,
+      artistMbid: album.artistMbid,
+      kind: "album",
+      recordingMbids: spreadSample(
+        tracks.map((track) => track.mbid).filter((mbid): mbid is string => Boolean(mbid)),
+        ALBUM_TRACK_SAMPLE,
+      ),
+      albumMbid: album.mbid,
+    });
+  }
+
+  return seeds;
 }
 
 /**
@@ -825,11 +960,24 @@ async function profileSeeds(seeds: readonly SoundsLikeSeed[]): Promise<SeedProfi
 
   return seeds.map((seed) => {
     const tags: Record<string, number> = {};
+    // An album's sampled tracks describe the same record its own tags do, so
+    // they join at the album's weight rather than outranking it; a song seed's
+    // ids are all that song, and lead.
+    const ownWeight =
+      seed.kind === "track" ? RECORDING_TAG_WEIGHT : ALBUM_TAG_WEIGHT;
     for (const mbid of seed.recordingMbids) {
-      layerTags(tags, recordingTags.get(mbid), RECORDING_TAG_WEIGHT);
+      layerTags(tags, recordingTags.get(mbid), ownWeight);
     }
     if (seed.albumMbid) layerTags(tags, albumTags.get(seed.albumMbid), ALBUM_TAG_WEIGHT);
-    if (seed.artistMbid) layerTags(tags, artistTags.get(seed.artistMbid), ARTIST_TAG_WEIGHT);
+
+    // The artist only speaks for a record that has not spoken for itself. See
+    // OWN_TAGS_ENOUGH: on a record that departs from its author's catalogue,
+    // this layer describes the catalogue and buries the departure.
+    const own = Object.keys(tags).filter((tag) => tagSpecificity(tag) > 0).length;
+    if (seed.artistMbid && own < OWN_TAGS_ENOUGH) {
+      layerTags(tags, artistTags.get(seed.artistMbid), ARTIST_TAG_WEIGHT);
+    }
+
     return { key: seed.key, tags };
   });
 }
@@ -846,11 +994,12 @@ async function profileSeeds(seeds: readonly SoundsLikeSeed[]): Promise<SeedProfi
  */
 async function gatherSoundsLikeCandidates(
   seeds: readonly SoundsLikeSeed[],
-  consensusTags: Readonly<Record<string, number>>,
+  consensus: ConsensusProfile,
   limit: number,
   band: ObscurityBand,
   ctx: JobContext,
-): Promise<ScoredArtistRef[]> {
+): Promise<{ artists: ScoredArtistRef[]; warnings: string[] }> {
+  const consensusTags = consensus.tags;
   const identity = (ref: { name: string }) =>
     normalizeArtistName(ref.name) || ref.name.trim().toLowerCase();
 
@@ -882,30 +1031,59 @@ async function gatherSoundsLikeCandidates(
       score: Math.max(existing?.score ?? 0, neighbour.score),
     });
 
+    if (!seedKey) return;
     const seen = support.get(key);
     if (seen) seen.add(seedKey);
     else support.set(key, new Set([seedKey]));
   };
 
+  /**
+   * For candidates that came from no seed's audience at all. They enter the
+   * pool on their tags and are judged on their tags — crediting them with
+   * co-listening support they do not have would let the tag channel manufacture
+   * the corroboration that the other two channels have to earn.
+   */
+  const absorbUnsupported = (neighbour: {
+    mbid?: string;
+    name: string;
+    score: number;
+    tags?: Record<string, number>;
+  }) => absorb("", neighbour);
+
   const provider = similarityProviders[0];
   const askFor = Math.max(100, limit * 3);
+  const steps = seeds.length + 3;
 
   for (const [index, seed] of seeds.entries()) {
-    ctx.progress(index, seeds.length + 2, `Finding music like ${seed.title}…`);
+    ctx.progress(index, steps, `Finding music like ${seed.title}…`);
 
     if (seed.recordingMbids.length > 0 && provider.getSimilarRecordings) {
-      try {
-        const neighbours = await provider.getSimilarRecordings(
-          seed.recordingMbids,
-          RECORDING_NEIGHBOURS,
-        );
-        for (const row of neighbours.data) {
-          const name = row.artistNames[0];
-          if (!name) continue;
-          absorb(seed.key, { mbid: row.artistMbids[0], name, score: row.score });
+      // A song's ids are versions of one thing, so the first that answers is
+      // the answer. An album's are different songs, so each is asked in turn
+      // and the neighbourhoods pooled — stopping early once the record has
+      // named enough people, which for anything well known is one song.
+      const groups =
+        seed.kind === "track"
+          ? [seed.recordingMbids]
+          : seed.recordingMbids.map((mbid) => [mbid]);
+
+      const found = new Set<string>();
+      for (const group of groups) {
+        if (seed.kind === "album" && found.size >= ALBUM_ARTISTS_ENOUGH) break;
+        try {
+          const neighbours = await provider.getSimilarRecordings(
+            group,
+            RECORDING_NEIGHBOURS,
+          );
+          for (const row of neighbours.data) {
+            const name = row.artistNames[0];
+            if (!name) continue;
+            found.add(identity({ name }));
+            absorb(seed.key, { mbid: row.artistMbids[0], name, score: row.score });
+          }
+        } catch {
+          // No SLA on the labs endpoints; the other channels still cover this seed.
         }
-      } catch {
-        // No SLA on the labs endpoints; the artist channel still covers this seed.
       }
     }
 
@@ -922,17 +1100,31 @@ async function gatherSoundsLikeCandidates(
     }
   }
 
-  if (merged.size === 0) return [];
+  ctx.progress(seeds.length, steps, "Looking for the same sound elsewhere…");
+  await gatherByTag(consensusTags, absorbUnsupported);
 
-  ctx.progress(seeds.length, seeds.length + 2, "Checking genres…");
+  if (merged.size === 0) return { artists: [], warnings: [] };
+
+  ctx.progress(seeds.length + 1, steps, "Checking genres…");
   await attachTagProfiles(merged);
 
   const seedCount = seeds.length;
   const scored = [...merged.entries()].map(([key, candidate]) => {
-    const found = support.get(key)?.size ?? 1;
+    const supported = support.get(key) ?? new Set<string>();
+    const found = Math.max(1, supported.size);
     return {
       candidate,
       fit: candidate.tags ? tagCosine(consensusTags, candidate.tags) : undefined,
+      /**
+       * How many of the listener's picks this candidate answers to — the tier
+       * it is filled from. See matchedSeedCount: an artist both your records
+       * point at outranks one only a single record points at, however strong
+       * that one claim is, and the shortlist only reaches down a tier when the
+       * one above it cannot fill the playlist.
+       */
+      matched: matchedSeedCount(candidate.tags, consensus.seeds, supported),
+      /** Whether any seed's own audience turned this candidate up. */
+      supported: supported.size > 0,
       // Ranked, not scaled — see rankByGenreThenSimilarity — so what matters
       // here is only that corroboration moves a candidate up the order.
       similarity:
@@ -960,9 +1152,47 @@ async function gatherSoundsLikeCandidates(
     band,
   );
 
+  /**
+   * Tier first, quality second.
+   *
+   * The score from rankByGenreThenSimilarity settles the order inside a tier
+   * and is deliberately not allowed to cross one, because the two answer
+   * different questions. That score says how good a candidate is against the
+   * average of the picks; the tier says how many of the picks it actually
+   * answers to. A rap artist with a commanding co-listening score sits below an
+   * obscure psychedelic one here not because it scored worse but because it was
+   * only ever an answer to one of the two records — and it stays reachable,
+   * because a thin top tier simply runs out and the next one fills the rest.
+   */
   const pool = usable
-    .map((entry, index) => ({ ...entry.candidate, score: ordering[index] }))
-    .sort((a, b) => b.score - a.score);
+    .map((entry, index) => ({
+      ...entry.candidate,
+      matched: entry.matched,
+      supported: entry.supported,
+      score: ordering[index],
+    }))
+    /**
+     * Within a tier, whoever turned up in one of the seeds' audiences comes
+     * first, because the tag channel did not discover anything — it re-searched
+     * the description the seeds produced. An artist matching only the tags
+     * matches how the record was labelled; an artist who also appears beside it
+     * in real listening matches the record.
+     *
+     * It shows. Left purely on genre, two 2015-and-2023 psychedelic albums
+     * returned The Electric Prunes and Tommy James & The Shondells: correct
+     * against a profile whose strongest tag is "psychedelic rock", and half a
+     * century from what was asked for. The co-listening data had already named
+     * Mac DeMarco, Unknown Mortal Orchestra, MGMT and Pond, and this is what
+     * puts them back in front of it — while leaving the tag channel exactly
+     * where it earns its place, filling in behind a seed whose own audience had
+     * nothing on-genre to offer.
+     */
+    .sort(
+      (a, b) =>
+        b.matched - a.matched ||
+        Number(b.supported) - Number(a.supported) ||
+        b.score - a.score,
+    );
 
   for (const candidate of pool) {
     if (candidate.mbid && candidate.tags) {
@@ -970,7 +1200,84 @@ async function gatherSoundsLikeCandidates(
     }
   }
 
-  return selectByDepth(pool, band, limit);
+  /**
+   * The obscurity band is applied INSIDE each group, never across them.
+   *
+   * selectByDepth works by skipping the head of a ranked list, because the head
+   * of a co-listening list is whoever is most listened to overall — skipping it
+   * is what turns similarity into discovery. Run over the whole shortlist it
+   * would now skip the candidates that match every pick, which is the exact
+   * opposite of what it is for.
+   *
+   * Grouping by tier alone is not enough either, and the measurement is
+   * unambiguous. The tag channel can supply two hundred artists that match
+   * every seed's genre while the seeds' own audiences supply ten; a 15% skip
+   * over a group of two hundred is a skip of thirty, and those ten are gone.
+   * Each (tier, has-support) group is therefore sliced on its own, so the depth
+   * skip only ever passes over the obvious members of a group and cannot
+   * silently delete a whole kind of evidence.
+   */
+  const groups = [...new Set(pool.map((entry) => `${entry.matched}:${entry.supported}`))];
+  const artists: typeof pool = [];
+  for (const group of groups) {
+    if (artists.length >= limit) break;
+    artists.push(
+      ...selectByDepth(
+        pool.filter((entry) => `${entry.matched}:${entry.supported}` === group),
+        band,
+        limit - artists.length,
+      ),
+    );
+  }
+
+  const warnings: string[] = [];
+  if (seedCount >= 2 && artists.length > 0) {
+    const full = artists.filter((artist) => artist.matched >= seedCount).length;
+    if (full < artists.length * THIN_FULL_MATCH) {
+      warnings.push(
+        `Few artists match all ${seedCount} of your picks, so most of this playlist matches one of them closely rather than all of them a little.`,
+      );
+    }
+  }
+
+  return { artists, warnings };
+}
+
+/**
+ * Artists MusicBrainz files under the sound itself, rather than under anyone
+ * who listens to it.
+ *
+ * See TAG_CHANNEL_TAGS. Tags are ordered by strength × specificity so the four
+ * calls buy "neo-psychedelia" and not "rock", and anything at or below the
+ * umbrella tier is skipped outright — a page of artists tagged "rock" is not a
+ * candidate pool, it is a phone book.
+ */
+async function gatherByTag(
+  consensusTags: Readonly<Record<string, number>>,
+  absorb: (artist: ScoredArtistRef) => void,
+): Promise<void> {
+  const chosen = Object.entries(consensusTags)
+    .map(([tag, strength]) => ({ tag, weight: strength * tagSpecificity(tag) }))
+    .filter((entry) => tagSpecificity(entry.tag) >= 0.5)
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, TAG_CHANNEL_TAGS);
+
+  for (const { tag, weight } of chosen) {
+    try {
+      const found = await tags.getArtistsForTag(tag, TAG_CHANNEL_ARTISTS);
+      for (const artist of found.data) {
+        absorb({
+          ...artist,
+          // Scaled by how central the tag is to the consensus, so an artist
+          // found under the profile's strongest tag outranks one found under
+          // its fourth.
+          score: artist.score * weight * TAG_CHANNEL_SIMILARITY,
+        });
+      }
+    } catch {
+      // The tag index is a bonus channel; the co-listening ones still stand.
+    }
+  }
 }
 
 /**
@@ -988,14 +1295,15 @@ export async function runSoundsLike(
 ): Promise<GenerationResult> {
   const { constraints } = input;
   const warnings: string[] = [];
-  const seeds = toSeeds(input);
   const noun = input.seedKind === "tracks" ? "song" : "album";
+
+  ctx.progress(0, 5, `Reading your ${noun}${(input.albums ?? input.tracks ?? []).length === 1 ? "" : "s"}…`);
+
+  const seeds = await toSeeds(input, ctx);
 
   if (seeds.length === 0) {
     return { warnings: [`No ${noun}s were chosen.`], trackCount: 0 };
   }
-
-  ctx.progress(0, 5, `Reading your ${noun}${seeds.length === 1 ? "" : "s"}…`);
 
   const consensus = consensusProfile(await profileSeeds(seeds));
 
@@ -1031,13 +1339,15 @@ export async function runSoundsLike(
     ),
   );
 
-  const similar = await gatherSoundsLikeCandidates(
-    seeds,
-    consensus.tags,
-    wanted,
-    constraints.obscurity,
-    ctx,
-  );
+  const { artists: similar, warnings: shortlistWarnings } =
+    await gatherSoundsLikeCandidates(
+      seeds,
+      consensus,
+      wanted,
+      constraints.obscurity,
+      ctx,
+    );
+  warnings.push(...shortlistWarnings);
 
   if (similar.length === 0) {
     return {

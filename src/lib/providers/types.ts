@@ -150,10 +150,24 @@ export interface CatalogProvider {
   getArtist(mbid: string): Promise<Sourced<ArtistDetail> | null>;
   getArtistAlbums(mbid: string): Promise<Sourced<AlbumRef[]>>;
   getAlbumTracks(album: AlbumRef): Promise<Sourced<TrackRef[]>>;
-  /** Songs matching free text, for picking playlist seeds. */
-  searchRecordings(query: string, limit?: number): Promise<Sourced<ScoredRecordingRef[]>>;
+  /**
+   * Songs matching free text, for picking playlist seeds.
+   *
+   * `signal` abandons the search if it is still queued when the person typing
+   * moves on. Search is the one place where that happens constantly and where
+   * it costs real time — see FetchOptions.signal.
+   */
+  searchRecordings(
+    query: string,
+    limit?: number,
+    signal?: AbortSignal,
+  ): Promise<Sourced<ScoredRecordingRef[]>>;
   /** Albums matching free text, for picking playlist seeds. */
-  searchReleaseGroups(query: string, limit?: number): Promise<Sourced<ScoredAlbumRef[]>>;
+  searchReleaseGroups(
+    query: string,
+    limit?: number,
+    signal?: AbortSignal,
+  ): Promise<Sourced<ScoredAlbumRef[]>>;
   /**
    * Genre profiles for many artists at once, keyed by MBID.
    *

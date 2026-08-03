@@ -9,7 +9,10 @@ export async function GET(request: Request) {
   }
 
   try {
-    const result = await catalog.searchReleaseGroups(query, 8);
+    // The client aborts a search as soon as it types past it, and the signal
+    // travels all the way to the MusicBrainz queue so the abandoned query stops
+    // holding a rate-limited slot in front of the one that is still wanted.
+    const result = await catalog.searchReleaseGroups(query, 8, request.signal);
     return NextResponse.json(
       {
         albums: result.data.map((album) => ({

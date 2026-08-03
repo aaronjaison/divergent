@@ -1,13 +1,35 @@
 @import "tailwindcss";
 
+/**
+ * Minimal, but not colourless.
+ *
+ * The chrome is deliberately quiet — warm paper, one weight of rule, generous
+ * space — and all of the colour is spent in two places: a single violet that
+ * every interactive thing shares, and four accent hues used ONLY to identify
+ * the four ways into the app. Spreading those four across buttons and links as
+ * well is what turns a colourful interface into a noisy one, so they never
+ * appear on anything you can click except as a mark beside it.
+ */
+
 :root {
-  --background: #fbfaf8;
-  --foreground: #16151a;
-  --muted: #6b6875;
+  --background: #faf8f4;
+  --foreground: #17161b;
+  --muted: #6b6673;
   --surface: #ffffff;
-  --border: #e5e2dd;
+  --surface-sunken: #f4f1ea;
+  --border: #e6e1d9;
+  --border-strong: #d5cfc3;
+
   --accent: #6d4aff;
   --accent-contrast: #ffffff;
+  /** The same violet at low alpha, for tinted fills that survive both themes. */
+  --accent-wash: rgb(109 74 255 / 0.09);
+
+  /** One per mode. Ordered as they appear on the home page. */
+  --hue-style: #6d4aff;
+  --hue-artist: #e07a2f;
+  --hue-similar: #0f9b8a;
+  --hue-match: #e8556b;
 }
 
 @theme inline {
@@ -15,22 +37,35 @@
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
   --color-surface: var(--surface);
+  --color-surface-sunken: var(--surface-sunken);
   --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
   --color-accent: var(--accent);
   --color-accent-contrast: var(--accent-contrast);
+  --color-accent-wash: var(--accent-wash);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-instrument-serif);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0d0c10;
-    --foreground: #ecebf0;
-    --muted: #9d99a8;
-    --surface: #17161c;
-    --border: #2a2833;
-    --accent: #9b83ff;
+    --background: #0c0b0f;
+    --foreground: #eceaf0;
+    --muted: #9c97a6;
+    --surface: #16151b;
+    --surface-sunken: #121116;
+    --border: #29262f;
+    --border-strong: #3a3644;
+
+    --accent: #a48bff;
     --accent-contrast: #14121c;
+    --accent-wash: rgb(164 139 255 / 0.14);
+
+    --hue-style: #a48bff;
+    --hue-artist: #f0a05a;
+    --hue-similar: #3fc9b4;
+    --hue-match: #ff7d8e;
   }
 }
 
@@ -38,4 +73,131 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+/**
+ * Editorial display face for headings and the wordmark.
+ *
+ * The single biggest reason the old page read as a utility rather than
+ * something made: one geometric sans doing every job at every size. A
+ * high-contrast serif against it costs one font request and does most of the
+ * work on its own.
+ */
+.font-display {
+  font-family: var(--font-display), Georgia, serif;
+  font-weight: 400;
+  letter-spacing: -0.015em;
+  /* The serif's own line height is loose for display sizes. */
+  line-height: 1.05;
+}
+
+/**
+ * The one piece of ornament: a slow wash of the four mode hues behind the top
+ * of the page. Fixed and non-interactive, so it never moves under scrolling
+ * content or intercepts a click.
+ */
+.aurora {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 26rem;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.5;
+  background:
+    radial-gradient(38rem 20rem at 12% -6rem, var(--hue-style), transparent 70%),
+    radial-gradient(32rem 18rem at 52% -8rem, var(--hue-match), transparent 70%),
+    radial-gradient(34rem 20rem at 88% -6rem, var(--hue-similar), transparent 70%);
+  filter: blur(28px) saturate(1.1);
+  mask-image: linear-gradient(to bottom, black, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  .aurora {
+    opacity: 0.28;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .aurora {
+    animation: drift 32s ease-in-out infinite alternate;
+  }
+}
+
+@keyframes drift {
+  from {
+    transform: translate3d(-2%, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(2%, 0.5rem, 0) scale(1.06);
+  }
+}
+
+/** A card that takes on its own hue when you reach for it. */
+.tile {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 0.9rem;
+  transition:
+    border-color 180ms ease,
+    transform 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.tile:hover {
+  border-color: var(--tile-hue, var(--accent));
+  transform: translateY(-2px);
+  box-shadow: 0 12px 28px -20px var(--tile-hue, var(--accent));
+}
+
+/** The mark that identifies a mode. Small, solid, and the only place a hue lands. */
+.mode-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: var(--tile-hue, var(--accent));
+}
+
+/** Inputs and buttons, so every form in the app agrees with itself. */
+.field {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 0.6rem;
+  padding: 0.625rem 0.9rem;
+  outline: none;
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.field:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-radius: 0.6rem;
+  padding: 0.65rem 1.25rem;
+  font-weight: 500;
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+
+.btn-primary:hover:not(:disabled) {
+  opacity: 0.92;
+  transform: translateY(-1px);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+}
+
+/** Keyboard users get the same ring the fields do, everywhere. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

@@ -131,7 +131,7 @@ export function BuilderForm() {
               type="button"
               onClick={submit}
               disabled={submitting}
-              className="rounded-lg bg-accent px-5 py-2.5 font-medium text-accent-contrast transition-opacity hover:opacity-90 disabled:opacity-50"
+              className="btn-primary"
             >
               {submitting ? "Starting…" : "Build the playlist"}
             </button>

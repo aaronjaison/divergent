@@ -45,10 +45,37 @@ export interface SoundiizHandoff {
   trackCount: number;
 }
 
+/**
+ * Everything known about each track, not just its name.
+ *
+ * Title and artist alone is a text search, and it fails exactly where you would
+ * expect a text search to fail: remasters and anniversary editions whose titles
+ * carry a parenthetical, live and single versions, regional title variants, and
+ * common titles shared by a dozen songs. Every one of those is a track the
+ * listener can find by hand in a second, which is what makes the failure so
+ * confusing to look at.
+ *
+ * The extra fields are already sitting in the snapshot on playlist_tracks and
+ * already go out in the CSV export, whose own note reads that ISRC "lifts their
+ * match rate substantially" — the handoff was simply throwing them away. An
+ * ISRC identifies one specific recording across every service on earth, so
+ * where one exists the match stops being a guess. Duration disambiguates the
+ * rest: an album cut and its radio edit share a title and differ by a minute.
+ *
+ * Fields are omitted rather than sent empty, since a blank ISRC or a zero
+ * duration is a claim about the track rather than an absence of one.
+ */
 export function buildTracklist(tracks: readonly PlaylistTrack[]) {
   return tracks.slice(0, SOUNDIIZ_MAX_TRACKS).map((track) => ({
     title: track.title,
     artists: track.artistNames,
+    ...(track.album ? { album: track.album } : {}),
+    ...(track.isrc ? { isrc: track.isrc } : {}),
+    // Seconds, which is the unit every tracklist format in this space uses —
+    // the CSV export and the M3U #EXTINF line both round to it.
+    ...(track.durationMs
+      ? { duration: Math.round(track.durationMs / 1000) }
+      : {}),
   }));
 }
 

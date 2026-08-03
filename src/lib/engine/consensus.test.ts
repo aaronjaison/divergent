@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { consensusProfile, usableSeedCount, type SeedProfile } from "./consensus";
+import {
+  consensusProfile,
+  matchedSeedCount,
+  usableSeedCount,
+  type SeedProfile,
+} from "./consensus";
 
 const seed = (key: string, tags: Record<string, number>): SeedProfile => ({ key, tags });
 
@@ -171,7 +176,12 @@ describe("consensusProfile", () => {
   });
 
   it("returns an empty profile for no seeds at all", () => {
-    expect(consensusProfile([])).toEqual({ tags: {}, agreement: 0, usedSeeds: 0 });
+    expect(consensusProfile([])).toEqual({
+      tags: {},
+      agreement: 0,
+      usedSeeds: 0,
+      seeds: [],
+    });
   });
 
   it("counts a repeated pick once", () => {
@@ -224,5 +234,91 @@ describe("usableSeedCount", () => {
         seed("d", { "dream pop": 0.5 }),
       ]),
     ).toBe(2);
+  });
+});
+
+describe("matchedSeedCount", () => {
+  /**
+   * The real pair that exposed the need for this: Lil Yachty's *Let's Start
+   * Here* and Tame Impala's *Currents*, as MusicBrainz actually tags them.
+   * Two psychedelic records whose audiences have nothing to do with each other.
+   */
+  const LETS_START_HERE = seed("lsh", {
+    "psychedelic rock": 1,
+    "space rock": 0.667,
+    "psychedelic pop": 0.333,
+    "neo-psychedelia": 0.333,
+    "neo soul": 0.333,
+    "psychedelic soul": 0.333,
+    "art pop": 0.333,
+  });
+  const CURRENTS = seed("cur", {
+    "psychedelic rock": 1,
+    "neo-psychedelia": 0.667,
+    rock: 0.5,
+    "psychedelic pop": 0.333,
+    electronic: 0.167,
+    "indie rock": 0.167,
+    "synth-pop": 0.167,
+    "dream pop": 0.167,
+  });
+  const BOTH = [LETS_START_HERE, CURRENTS];
+  const NO_SUPPORT = new Set<string>();
+
+  it("counts both seeds for an artist that genuinely fits both", () => {
+    // Pond, as tagged: psychedelic rock, space rock, neo-psychedelia.
+    const pond = { "psychedelic rock": 1, "space rock": 0.8, "neo-psychedelia": 0.7 };
+    expect(matchedSeedCount(pond, BOTH, NO_SUPPORT)).toBe(2);
+  });
+
+  it("counts one seed for an artist that only fits one of them", () => {
+    // The War on Drugs: 0.17 against the first record, 0.49 against the second.
+    const warOnDrugs = {
+      "indie rock": 1,
+      "dream pop": 0.6,
+      "heartland rock": 0.6,
+      "neo-psychedelia": 0.4,
+    };
+    expect(matchedSeedCount(warOnDrugs, BOTH, NO_SUPPORT)).toBe(1);
+  });
+
+  it("counts nothing for the rap that co-listening kept offering", () => {
+    // Every rap artist in the shortlist scored exactly 0.00 against each record.
+    const rap: Record<string, number>[] = [
+      { "hip hop": 1, "southern hip hop": 1, trap: 1 },
+      { trap: 1, "hip hop": 0.8, "gangsta rap": 0.8, "pop rap": 0.6 },
+      { "hip hop": 1, "east coast hip hop": 0.7, "emo rap": 0.5 },
+    ];
+    for (const tags of rap) {
+      expect(matchedSeedCount(tags, BOTH, NO_SUPPORT)).toBe(0);
+    }
+  });
+
+  it("credits co-listening for an artist MusicBrainz has never tagged", () => {
+    // The only evidence available for a small artist, and the reason support
+    // counts at all: scoring the untagged at zero buries exactly the artists
+    // this app exists to surface.
+    expect(matchedSeedCount(undefined, BOTH, new Set(["cur"]))).toBe(1);
+    expect(matchedSeedCount({}, BOTH, new Set(["lsh", "cur"]))).toBe(2);
+  });
+
+  it("does not double-count a seed that both matches and supports", () => {
+    const pond = { "psychedelic rock": 1, "space rock": 0.8, "neo-psychedelia": 0.7 };
+    expect(matchedSeedCount(pond, BOTH, new Set(["lsh", "cur"]))).toBe(2);
+  });
+
+  it("counts a seed that carried no tags at all but did name the artist", () => {
+    // An untagged seed is absent from the profiles, so its only route into the
+    // count is its support — which must still be worth a tier.
+    expect(matchedSeedCount({ shoegaze: 1 }, [LETS_START_HERE], new Set(["untagged"])))
+      .toBe(1);
+  });
+
+  it("ranks a two-seed match above a strong one-seed match", () => {
+    const pond = { "psychedelic rock": 1, "space rock": 0.8, "neo-psychedelia": 0.7 };
+    const beachHouse = { "dream pop": 1, "indie pop": 0.7, shoegaze: 0.6 };
+    expect(matchedSeedCount(pond, BOTH, NO_SUPPORT)).toBeGreaterThan(
+      matchedSeedCount(beachHouse, BOTH, NO_SUPPORT),
+    );
   });
 });

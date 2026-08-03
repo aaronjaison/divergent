@@ -98,11 +98,27 @@ describe("renderExport", () => {
 });
 
 describe("soundiiz handoff", () => {
-  it("sends only title and artists, which is all the API accepts", () => {
-    const payload = buildTracklist([track()]);
-    expect(payload).toEqual([
-      { title: "Souvlaki Space Station", artists: ["Slowdive"] },
+  it("sends the ISRC, album and duration, not just the name", () => {
+    // Title and artist alone is a text search, and it misses remasters, live
+    // versions and common titles — the songs people then find by hand and
+    // wonder why the transfer could not. Soundiiz documents isrc and album as
+    // matching attributes and round-trips duration in its own export format.
+    expect(buildTracklist([track()])).toEqual([
+      {
+        title: "Souvlaki Space Station",
+        artists: ["Slowdive"],
+        album: "Souvlaki",
+        isrc: "GBAAA9300001",
+        duration: 366,
+      },
     ]);
+  });
+
+  it("omits fields it does not have rather than sending them empty", () => {
+    // A blank ISRC is a claim about the recording; an absent one is not.
+    expect(
+      buildTracklist([track({ album: null, isrc: null, durationMs: null })]),
+    ).toEqual([{ title: "Souvlaki Space Station", artists: ["Slowdive"] }]);
   });
 
   it("truncates to the API's 200-track ceiling", () => {

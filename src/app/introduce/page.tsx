@@ -1,4 +1,5 @@
 import { IntroduceForm } from "@/components/IntroduceForm";
+import { PageHeader } from "@/components/PageHeader";
 
 export const metadata = {
   title: "Introduce me to an artist — Divergent",
@@ -7,16 +8,17 @@ export const metadata = {
 export default function IntroducePage() {
   return (
     <div className="max-w-3xl">
-      <h1 className="text-3xl font-semibold tracking-tight">
-        Introduce me to an artist
-      </h1>
-      <p className="mt-3 max-w-2xl text-muted text-pretty">
-        Pick someone you have been meaning to listen to properly. You will get a
+      <PageHeader
+        eyebrow="Introduce me"
+        title="Meet someone properly."
+        hue="var(--hue-artist)"
+      >
+        Pick an artist you have been meaning to listen to. You will get a
         playlist built for how you want to meet them — not just whatever the
         algorithm plays most.
-      </p>
+      </PageHeader>
 
-      <div className="mt-8">
+      <div className="mt-10">
         <IntroduceForm />
       </div>
     </div>

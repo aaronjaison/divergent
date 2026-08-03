@@ -45,6 +45,8 @@ export async function mbFetch<S extends z.ZodType>(
   params: MbParams,
   schema: S,
   ttl: CacheTtl = TTL.catalog,
+  /** Abandons the call if it is still queued when the caller gives up. */
+  signal?: AbortSignal,
 ): Promise<z.infer<S> | null> {
   const query = qs({ ...params, fmt: "json" });
   // The whole query string is the key: the same release-group fetched with and
@@ -52,7 +54,7 @@ export async function mbFetch<S extends z.ZodType>(
   const key = `mb:${path}?${query}`;
 
   const raw = await cachedFetch<unknown>(key, MB_PROVIDER, ttl, () =>
-    providerFetch<unknown>(MB_PROVIDER, `${MB_BASE}${path}?${query}`),
+    providerFetch<unknown>(MB_PROVIDER, `${MB_BASE}${path}?${query}`, { signal }),
   );
   if (raw === null || raw === undefined) return null;
 

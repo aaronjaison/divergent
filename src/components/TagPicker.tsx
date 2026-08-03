@@ -99,7 +99,7 @@ export function TagPicker({ selected, onChange, popular = [] }: Props) {
         }}
         placeholder="shoegaze, dream pop, boom bap, cosmic jazz…"
         autoComplete="off"
-        className="mt-3 w-full rounded-lg border border-border bg-surface px-4 py-2.5 outline-none focus:border-accent"
+        className="mt-3 w-full field"
       />
 
       {suggestions.length > 0 && (

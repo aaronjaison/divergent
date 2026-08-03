@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import Link from "next/link";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Instrument_Serif } from "next/font/google";
+import { SiteNav } from "@/components/SiteNav";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -10,6 +10,13 @@ const geistSans = Geist({
 
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+/** Headings and the wordmark only — see .font-display in globals.css. */
+const instrumentSerif = Instrument_Serif({
+  variable: "--font-instrument-serif",
+  weight: "400",
   subsets: ["latin"],
 });
 
@@ -27,38 +34,24 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} ${instrumentSerif.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        <header className="border-b border-border">
-          <nav className="mx-auto flex w-full max-w-5xl items-center gap-6 px-6 py-4">
-            <Link href="/" className="font-semibold tracking-tight">
-              Divergent
-            </Link>
-            <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm text-muted">
-              <Link href="/builder" className="hover:text-foreground">
-                Build by style
-              </Link>
-              <Link href="/introduce" className="hover:text-foreground">
-                Introduce me
-              </Link>
-              <Link href="/discover" className="hover:text-foreground">
-                Similar artists
-              </Link>
-              <Link href="/sounds-like" className="hover:text-foreground">
-                Music like this
-              </Link>
-            </div>
-          </nav>
+        <div className="aurora" aria-hidden="true" />
+
+        <header className="sticky top-0 z-10 border-b border-border bg-background/80 backdrop-blur-md">
+          <SiteNav />
         </header>
-        <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-10">
+
+        <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-12">
           {children}
         </main>
+
         <footer className="border-t border-border">
-          <div className="mx-auto w-full max-w-5xl px-6 py-6 text-xs text-muted">
+          <div className="mx-auto w-full max-w-5xl px-6 py-8 text-xs text-muted">
             Music data from{" "}
             <a
-              className="underline hover:text-foreground"
+              className="underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-accent"
               href="https://musicbrainz.org"
               target="_blank"
               rel="noreferrer"
@@ -67,7 +60,7 @@ export default function RootLayout({
             </a>{" "}
             and{" "}
             <a
-              className="underline hover:text-foreground"
+              className="underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-accent"
               href="https://listenbrainz.org"
               target="_blank"
               rel="noreferrer"

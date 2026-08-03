@@ -20,7 +20,8 @@ export async function GET(request: Request) {
   }
 
   try {
-    const result = await catalog.searchRecordings(query, 8);
+    // Abandoned when the client types past it — see the albums route.
+    const result = await catalog.searchRecordings(query, 8, request.signal);
     return NextResponse.json(
       {
         recordings: result.data.map((recording) => ({

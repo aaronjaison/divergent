@@ -121,7 +121,7 @@ export function ArtistSearch({
         }}
         placeholder="Start typing an artist name…"
         autoComplete="off"
-        className="mt-2 w-full rounded-lg border border-border bg-surface px-4 py-2.5 outline-none focus:border-accent"
+        className="mt-2 w-full field"
       />
 
       {loading && <p className="mt-2 text-sm text-muted">Searching…</p>}

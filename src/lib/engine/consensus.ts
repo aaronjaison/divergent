@@ -61,6 +61,25 @@ const TRIM_SPECIFICITY = 0.5;
 /** Cap on the result, so a wide consensus stays a profile and not a census. */
 const MAX_TAGS = 24;
 
+/**
+ * Cosine at which a candidate counts as a match for ONE seed, rather than for
+ * what the seeds share.
+ *
+ * Measured, on the pair that exposed the need for it — Lil Yachty's *Let's Start
+ * Here* and Tame Impala's *Currents*, two psychedelic records with completely
+ * different audiences. Against those two profiles the genuine answers score
+ * between 0.38 and 0.75 on both (MGMT 0.43/0.75, Pond 0.65/0.56, King Gizzard
+ * 0.38/0.50, Unknown Mortal Orchestra 0.40/0.46) while every rap artist the
+ * co-listening data offered scored exactly 0.00 against each of them. In
+ * between sit the one-sided matches this threshold exists to admit: Kasabian
+ * 0.19/0.45, The War on Drugs 0.17/0.49, Washed Out 0.15/0.45 — all plainly
+ * neighbours of the second record and not of the first.
+ *
+ * 0.2 puts the line under the true matches and far above the noise, with the
+ * nearest false positive an order of magnitude below it.
+ */
+export const SEED_MATCH_FLOOR = 0.2;
+
 export interface SeedProfile {
   /** Stable identity, for dedupe — an MBID in practice. */
   key: string;
@@ -87,6 +106,16 @@ export interface ConsensusProfile {
    * songs were used.
    */
   usedSeeds: number;
+  /**
+   * The cleaned per-seed profiles the consensus was built from, in the order
+   * they were supplied and keyed as they arrived.
+   *
+   * Handed back because the consensus alone cannot answer the question that
+   * decides the playlist when the seeds only half agree: not "does this
+   * candidate fit the average" but "which of these records does it fit". See
+   * matchedSeedCount.
+   */
+  seeds: SeedProfile[];
 }
 
 /**
@@ -118,9 +147,9 @@ function cleanSeed(tags: Readonly<Record<string, number>>): Record<string, numbe
 }
 
 /** The seeds that can actually vote: deduped, and tagged with something usable. */
-function usableSeeds(seeds: readonly SeedProfile[]): Record<string, number>[] {
+function usableSeeds(seeds: readonly SeedProfile[]): SeedProfile[] {
   const seen = new Set<string>();
-  const out: Record<string, number>[] = [];
+  const out: SeedProfile[] = [];
 
   for (const seed of seeds) {
     if (seed.key && seen.has(seed.key)) continue;
@@ -130,7 +159,7 @@ function usableSeeds(seeds: readonly SeedProfile[]): Record<string, number>[] {
     // An untagged seed is absence of evidence, not disagreement. Counting it in
     // `n` would penalise every tag the others share for a gap in MusicBrainz's
     // coverage, so it drops out of the vote entirely rather than voting against.
-    if (Object.keys(cleaned).length > 0) out.push(cleaned);
+    if (Object.keys(cleaned).length > 0) out.push({ key: seed.key, tags: cleaned });
   }
 
   return out;
@@ -151,11 +180,11 @@ export function usableSeedCount(seeds: readonly SeedProfile[]): number {
 export function consensusProfile(seeds: readonly SeedProfile[]): ConsensusProfile {
   const profiles = usableSeeds(seeds);
   const n = profiles.length;
-  if (n === 0) return { tags: {}, agreement: 0, usedSeeds: 0 };
+  if (n === 0) return { tags: {}, agreement: 0, usedSeeds: 0, seeds: [] };
 
   const carriers = new Map<string, number[]>();
   for (const profile of profiles) {
-    for (const [tag, strength] of Object.entries(profile)) {
+    for (const [tag, strength] of Object.entries(profile.tags)) {
       const existing = carriers.get(tag);
       if (existing) existing.push(strength);
       else carriers.set(tag, [strength]);
@@ -196,7 +225,9 @@ export function consensusProfile(seeds: readonly SeedProfile[]): ConsensusProfil
   }
 
   const peak = Math.max(0, ...raw.values());
-  if (peak <= 0) return { tags: {}, agreement: agreementOf(profiles), usedSeeds: n };
+  if (peak <= 0) {
+    return { tags: {}, agreement: agreementOf(profiles), usedSeeds: n, seeds: profiles };
+  }
 
   /**
    * Normalised AFTER the coverage penalty, which is what makes the disjoint
@@ -214,7 +245,49 @@ export function consensusProfile(seeds: readonly SeedProfile[]): ConsensusProfil
     tags[tag] = value;
   }
 
-  return { tags, agreement: agreementOf(profiles), usedSeeds: n };
+  return { tags, agreement: agreementOf(profiles), usedSeeds: n, seeds: profiles };
+}
+
+/**
+ * How many of the listener's picks a candidate actually matches.
+ *
+ * This is the difference between "fits the average of what you chose" and
+ * "fits what you chose", and the two come apart exactly when the picks do. Seed
+ * two psychedelic records with unrelated audiences and the consensus is a fine
+ * description of both, but the candidate pool is dominated by whichever record
+ * has the larger following — so ranking on the consensus alone hands the
+ * playlist to one seed and quietly drops the other.
+ *
+ * Counting matches per seed instead lets the caller fill from the candidates
+ * that answer to every pick before it reaches down to the ones that answer to
+ * only one, which is the honest order: an artist both your records point at is
+ * a better answer than an artist one of them points at, and an artist neither
+ * points at is not an answer at all.
+ *
+ * A candidate matches a seed on either kind of evidence. Genre is the stronger
+ * of the two and is checked against that seed's own profile rather than the
+ * consensus. Co-listening counts as well, because it is the only evidence
+ * available for the artists MusicBrainz has never tagged — and those are
+ * disproportionately the small ones this app exists to surface.
+ */
+export function matchedSeedCount(
+  candidateTags: Readonly<Record<string, number>> | undefined,
+  profiled: readonly SeedProfile[],
+  supportedKeys: ReadonlySet<string>,
+  floor = SEED_MATCH_FLOOR,
+): number {
+  // Seeds that carried no usable tags are absent from `profiled` but can still
+  // appear in `supportedKeys`, so the union is taken over keys rather than
+  // counted per source.
+  const matched = new Set(supportedKeys);
+
+  if (candidateTags && Object.keys(candidateTags).length > 0) {
+    for (const seed of profiled) {
+      if (tagCosine(candidateTags, seed.tags) >= floor) matched.add(seed.key);
+    }
+  }
+
+  return matched.size;
 }
 
 /**
@@ -230,7 +303,7 @@ export function consensusProfile(seeds: readonly SeedProfile[]): ConsensusProfil
  * around 0.60 as a mean and around 0.85 as a median — and the second is a lie,
  * since a fifth of what the listener asked for is about to go missing.
  */
-function agreementOf(profiles: readonly Record<string, number>[]): number {
+function agreementOf(profiles: readonly SeedProfile[]): number {
   if (profiles.length === 0) return 0;
   if (profiles.length === 1) return 1;
 
@@ -238,7 +311,7 @@ function agreementOf(profiles: readonly Record<string, number>[]): number {
   let pairs = 0;
   for (let i = 0; i < profiles.length; i++) {
     for (let j = i + 1; j < profiles.length; j++) {
-      total += tagCosine(profiles[i], profiles[j]);
+      total += tagCosine(profiles[i].tags, profiles[j].tags);
       pairs++;
     }
   }

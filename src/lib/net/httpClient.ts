@@ -22,6 +22,29 @@ interface FetchOptions {
   timeoutMs?: number;
   /** Treat these statuses as an empty result instead of an error. Default [404]. */
   emptyOn?: number[];
+  /**
+   * Abandons the request if the caller has stopped caring by the time the
+   * queue reaches it.
+   *
+   * What this saves is the round trip, not the queue slot — the limiter paces
+   * on job starts and charges an abandoned job the same gap as a real one, and
+   * the test in httpClient.test.ts measured exactly that when the first version
+   * of this comment claimed otherwise. The round trip is the part worth saving
+   * anyway: MusicBrainz paces at 1.1 seconds but answers in anywhere from 0.2
+   * to 20 of them, measured on the same query shape minutes apart. A search box
+   * firing on each pause stacks its abandoned queries in front of the one the
+   * person actually meant, and the last keystroke waits out every one of their
+   * responses. Skipping those responses is most of the wait.
+   */
+  signal?: AbortSignal;
+}
+
+/** Thrown when a caller abandons a request; not a provider failure. */
+export class RequestAbortedError extends Error {
+  constructor() {
+    super("Request abandoned by the caller");
+    this.name = "RequestAbortedError";
+  }
 }
 
 const RETRYABLE = new Set([429, 500, 502, 503, 504]);
@@ -59,9 +82,16 @@ export async function providerFetch<T>(
     attempts = 3,
     timeoutMs = 15_000,
     emptyOn = [404],
+    signal,
   } = options;
 
   return limiterFor(provider).schedule(async () => {
+    // Checked here rather than before queueing, because here is where it pays:
+    // the job has just waited out everything ahead of it, and abandoning now
+    // hands the slot straight to the next one instead of spending a second and
+    // a wire call on an answer nobody will read.
+    if (signal?.aborted) throw new RequestAbortedError();
+
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt < attempts; attempt++) {
@@ -69,6 +99,12 @@ export async function providerFetch<T>(
       const timer = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
+        // Checked before dispatch, and deliberately not while the request is in
+        // flight. A call already on the wire is nearly free to finish and its
+        // answer goes into the cache, where a retype collects it for nothing —
+        // and cachedFetch hands one in-flight promise to every caller waiting
+        // on the same key, so tearing it down would fail the other callers too.
+        if (signal?.aborted) throw new RequestAbortedError();
         const response = await fetch(url, {
           headers: {
             // MusicBrainz blocks or throttles generic agents; the others are
@@ -107,6 +143,9 @@ export async function providerFetch<T>(
         if (err instanceof ProviderHttpError && !RETRYABLE.has(err.status)) {
           throw err;
         }
+        if (err instanceof RequestAbortedError) throw err;
+        // A retry is a fresh queue slot, so an abandoned call must not take one.
+        if (signal?.aborted) throw new RequestAbortedError();
         lastError = err;
         if (attempt < attempts - 1) {
           await sleep(backoffMs(attempt, null));

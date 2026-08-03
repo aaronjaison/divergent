@@ -19,11 +19,11 @@ export function TrackTable({ tracks }: { tracks: PlaylistTrack[] }) {
   }
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-border">
+    <div className="overflow-x-auto rounded-xl border border-border bg-surface">
       <table className="w-full min-w-[38rem] text-sm">
-        <thead className="border-b border-border text-left text-xs uppercase tracking-wide text-muted">
+        <thead className="border-b border-border bg-surface-sunken text-left text-xs uppercase tracking-[0.15em] text-muted">
           <tr>
-            <th className="w-10 px-4 py-3 font-medium">#</th>
+            <th className="w-12 px-4 py-3 font-medium">#</th>
             <th className="px-4 py-3 font-medium">Track</th>
             <th className="px-4 py-3 font-medium">Release</th>
             <th className="w-16 px-4 py-3 text-right font-medium">Length</th>
@@ -33,10 +33,10 @@ export function TrackTable({ tracks }: { tracks: PlaylistTrack[] }) {
           {tracks.map((track) => (
             <tr
               key={`${track.position}-${track.title}`}
-              className="border-b border-border last:border-0"
+              className="border-b border-border transition-colors last:border-0 hover:bg-surface-sunken"
             >
-              <td className="px-4 py-3 text-muted tabular-nums">
-                {track.position + 1}
+              <td className="px-4 py-3 align-top font-mono text-xs text-muted tabular-nums">
+                {String(track.position + 1).padStart(2, "0")}
               </td>
               <td className="px-4 py-3">
                 <div className="font-medium">{track.title}</div>
@@ -46,11 +46,11 @@ export function TrackTable({ tracks }: { tracks: PlaylistTrack[] }) {
                 )}
                 <TrackLinks isrc={track.isrc} />
               </td>
-              <td className="px-4 py-3 text-muted">
+              <td className="px-4 py-3 align-top text-muted">
                 {track.album ?? "—"}
                 {track.year ? ` (${track.year})` : ""}
               </td>
-              <td className="px-4 py-3 text-right text-muted tabular-nums">
+              <td className="px-4 py-3 text-right align-top text-muted tabular-nums">
                 {formatDuration(track.durationMs)}
               </td>
             </tr>

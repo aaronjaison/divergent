@@ -1,4 +1,5 @@
 import { DiscoverForm } from "@/components/DiscoverForm";
+import { PageHeader } from "@/components/PageHeader";
 
 export const metadata = {
   title: "Discover similar artists — Divergent",
@@ -7,16 +8,17 @@ export const metadata = {
 export default function DiscoverPage() {
   return (
     <div className="max-w-3xl">
-      <h1 className="text-3xl font-semibold tracking-tight">
-        Discover similar artists
-      </h1>
-      <p className="mt-3 max-w-2xl text-muted text-pretty">
-        Name an artist you already love and get a playlist of everyone else who
-        sounds like them — one track each, so a single listen introduces you to
-        dozens of artists at once. The artist you named is left out on purpose.
-      </p>
+      <PageHeader
+        eyebrow="Similar artists"
+        title="Everyone else who sounds like them."
+        hue="var(--hue-similar)"
+      >
+        Name an artist you already love and get one track each from the people
+        who share their sound, so a single listen introduces you to dozens of
+        artists at once. The artist you named is left out on purpose.
+      </PageHeader>
 
-      <div className="mt-8">
+      <div className="mt-10">
         <DiscoverForm />
       </div>
     </div>

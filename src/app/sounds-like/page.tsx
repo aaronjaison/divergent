@@ -1,3 +1,4 @@
+import { PageHeader } from "@/components/PageHeader";
 import { SoundsLikeForm } from "@/components/SoundsLikeForm";
 
 export const metadata = {
@@ -7,17 +8,18 @@ export const metadata = {
 export default function SoundsLikePage() {
   return (
     <div className="max-w-3xl">
-      <h1 className="text-3xl font-semibold tracking-tight">
-        Find music like this
-      </h1>
-      <p className="mt-3 max-w-2xl text-muted text-pretty">
-        Name the songs or albums you have in mind and get a playlist of other
-        artists who fit them. The more you name, the better this works: with one
-        song we can only see a genre, but with several we can see what they have
-        in common — and that is the thing worth matching.
-      </p>
+      <PageHeader
+        eyebrow="Music like this"
+        title="Name what you have in mind."
+        hue="var(--hue-match)"
+      >
+        Give us the songs or albums you are thinking of and get a playlist of
+        other artists who fit them. The more you name, the better this works:
+        one song only shows us a genre, but several show us what they have in
+        common — and that is the thing worth matching.
+      </PageHeader>
 
-      <div className="mt-8">
+      <div className="mt-10">
         <SoundsLikeForm />
       </div>
     </div>

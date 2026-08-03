@@ -27,10 +27,11 @@ export default async function PlaylistPage({
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-3xl font-semibold tracking-tight text-balance">
+        <p className="text-xs uppercase tracking-[0.2em] text-muted">Playlist</p>
+        <h1 className="font-display mt-3 text-4xl text-balance sm:text-5xl">
           {playlist.title}
         </h1>
-        <p className="mt-2 text-sm text-muted">
+        <p className="mt-3 text-sm text-muted">
           {building
             ? "Building…"
             : `${tracks.length} track${tracks.length === 1 ? "" : "s"}`}

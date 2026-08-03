@@ -56,6 +56,26 @@ const NON_GENRE_TAGS = new Set([
   "live", "cover", "under 2000 listeners",
 ]);
 
+/**
+ * Bookkeeping tags, which the fixed list above cannot catch because each one is
+ * unique to whoever typed it.
+ *
+ * MusicBrainz's tag field is free text, and a working minority of editors use it
+ * as a private filing system. Every one of these came off a real seed record:
+ * *Let's Start Here* carries "offizielle charts", "ai cover art" and "1–4
+ * wochen"; *Currents* adds "5+ wochen", "ph_temp_checken" and a Discogs list
+ * name forty words long. None describes how anything sounds, and left at full
+ * specificity they are the sharpest thing in a thinly-tagged album's profile.
+ */
+const NON_GENRE_PATTERNS = [
+  /chart/,
+  /^discogs\//,
+  // German chart-duration tags: "1–4 wochen", "5+ wochen", "10+ wochen".
+  /\bwochen\b/,
+  /^ph_/,
+  /cover art/,
+];
+
 const UMBRELLA_WEIGHT = 0.15;
 const BROAD_WEIGHT = 0.5;
 
@@ -75,6 +95,7 @@ export function tagSpecificity(tag: string): number {
   // "1990s", "2020s", "80s".
   if (/^(19|20)?\d0s$/.test(key)) return 0;
   if (NON_GENRE_TAGS.has(key)) return 0;
+  if (NON_GENRE_PATTERNS.some((pattern) => pattern.test(key))) return 0;
   if (UMBRELLA_TAGS.has(key)) return UMBRELLA_WEIGHT;
   if (BROAD_TAGS.has(key)) return BROAD_WEIGHT;
   return 1;

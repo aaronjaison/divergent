@@ -587,6 +587,13 @@ async function browseReleases(
  */
 const TAG_PROFILE_BATCH = 50;
 
+/**
+ * Restricts an album search to things that are albums. Only the primary type
+ * is expressed here; the secondary types are still filtered on the way out,
+ * where isExcludedReleaseType already owns that judgement.
+ */
+const ALBUM_TYPE_FILTER = "(primarytype:album OR primarytype:ep)";
+
 export const musicbrainzCatalog: CatalogProvider = {
   id: MB_PROVIDER,
 
@@ -609,7 +616,7 @@ export const musicbrainzCatalog: CatalogProvider = {
     return sourced(results, MB_PROVIDER, MB_CORE_LICENSE);
   },
 
-  async searchRecordings(query, limit = 10) {
+  async searchRecordings(query, limit = 10, signal) {
     const search = dismaxQuery(query, ["recording", "artist"]);
     if (!search) return sourced([], MB_PROVIDER, mbTagLicense());
 
@@ -621,6 +628,7 @@ export const musicbrainzCatalog: CatalogProvider = {
       { query: search, limit: MB_MAX_LIMIT },
       mbRecordingSearchSchema,
       TTL.search,
+      signal,
     );
 
     // Recording tags ride along, so this carries the tag licence.
@@ -631,15 +639,22 @@ export const musicbrainzCatalog: CatalogProvider = {
     );
   },
 
-  async searchReleaseGroups(query, limit = 10) {
+  async searchReleaseGroups(query, limit = 10, signal) {
     const search = dismaxQuery(query, ["releasegroup", "artist"]);
     if (!search) return sourced([], MB_PROVIDER, mbTagLicense());
 
     const envelope = await mbFetch(
       "/release-group",
-      { query: search, limit: MB_MAX_LIMIT },
+      // Filtered in the query rather than afterwards. The type test below runs
+      // either way, so this changes nothing about which albums are acceptable
+      // — it changes how many of them fit in the one page we are allowed to
+      // read. Unfiltered, most of that page is singles, live records and
+      // compilations that are then thrown away, and a less famous album can
+      // fall off the end behind its own artist's back catalogue of them.
+      { query: `(${search}) AND ${ALBUM_TYPE_FILTER}`, limit: MB_MAX_LIMIT },
       mbReleaseGroupSearchSchema,
       TTL.search,
+      signal,
     );
 
     const albums = (envelope?.["release-groups"] ?? [])
