@@ -6,6 +6,7 @@ import { upsertArtist } from "@/lib/db/repo/artists";
 import { saveSimilarArtists } from "@/lib/db/repo/similarity";
 import { saveArtistTags } from "@/lib/db/repo/tags";
 import { savePopularity } from "@/lib/db/repo/recordings";
+import { consensusProfile, type SeedProfile } from "@/lib/engine/consensus";
 import { selectByDepth } from "@/lib/engine/obscurity";
 import { rankByGenreThenSimilarity, tagCosine } from "@/lib/engine/scoring";
 import type {
@@ -562,27 +563,8 @@ async function findSimilarArtists(
     }
   }
 
-  /** Attaches genre profiles to everything in `merged`, batched. */
-  const profileAll = async () => {
-    if (!catalog.getTagProfiles) return;
-    const needed = [...merged.values()]
-      .filter((a) => a.mbid && !a.tags)
-      .map((a) => a.mbid as string);
-    if (needed.length === 0) return;
-
-    try {
-      const profiles = await catalog.getTagProfiles(needed);
-      for (const [key, candidate] of merged) {
-        const tags = candidate.mbid ? profiles.data.get(candidate.mbid) : undefined;
-        if (tags) merged.set(key, { ...candidate, tags });
-      }
-    } catch {
-      // Ordering falls back to similarity alone, which is the old behaviour.
-    }
-  };
-
   ctx.progress(1, 3, "Checking genres…");
-  await profileAll();
+  await attachTagProfiles(merged);
 
   const fitOf = (candidate: ScoredArtistRef) =>
     candidate.tags ? tagCosine(seedTags, candidate.tags) : undefined;
@@ -616,7 +598,7 @@ async function findSimilarArtists(
       }
     }
 
-    await profileAll();
+    await attachTagProfiles(merged);
   }
 
   const all = [...merged.values()];
@@ -666,11 +648,436 @@ async function findSimilarArtists(
   return selectByDepth(pool, band, limit);
 }
 
+/**
+ * Attaches genre profiles to every candidate that lacks one, in place.
+ *
+ * Batched, which is the only reason judging candidates on genre is affordable
+ * at all: one artist lookup per candidate would be a second each.
+ */
+async function attachTagProfiles(merged: Map<string, ScoredArtistRef>): Promise<void> {
+  if (!catalog.getTagProfiles) return;
+
+  const needed = [...merged.values()]
+    .filter((candidate) => candidate.mbid && !candidate.tags)
+    .map((candidate) => candidate.mbid as string);
+  if (needed.length === 0) return;
+
+  try {
+    const profiles = await catalog.getTagProfiles(needed);
+    for (const [key, candidate] of merged) {
+      const tags = candidate.mbid ? profiles.data.get(candidate.mbid) : undefined;
+      if (tags) merged.set(key, { ...candidate, tags });
+    }
+  } catch {
+    // Ordering falls back to similarity alone, which is the old behaviour.
+  }
+}
+
 /** How many near neighbours to expand from when the first-degree pool is thin. */
 const SECOND_DEGREE_SEEDS = 6;
 
 /** Two steps out is a weaker claim than one, and scores have to reflect that. */
 const SECOND_DEGREE_DISCOUNT = 0.7;
+
+// --- Sounds like these songs or albums -----------------------------------
+
+export interface TrackSeedInput {
+  /** Every recording id for the song, best first — see ScoredRecordingRef. */
+  mbids: string[];
+  title: string;
+  artistNames: string[];
+  artistMbid?: string;
+  album?: string;
+  albumMbid?: string;
+  year?: number;
+}
+
+export interface AlbumSeedInput {
+  mbid: string;
+  title: string;
+  artistNames: string[];
+  artistMbid?: string;
+  year?: number;
+}
+
+export interface SoundsLikeInput {
+  playlistId: string;
+  seedKind: "tracks" | "albums";
+  tracks?: TrackSeedInput[];
+  albums?: AlbumSeedInput[];
+  constraints: StyleConstraints;
+}
+
+/** One seed reduced to the ids needed to profile it, whichever kind it was. */
+interface SoundsLikeSeed {
+  key: string;
+  title: string;
+  artistNames: string[];
+  artistMbid?: string;
+  /** Empty for an album seed. */
+  recordingMbids: string[];
+  albumMbid?: string;
+}
+
+/**
+ * How much of a seed's profile each layer may contribute.
+ *
+ * A song is described three times over, at falling resolution: by its own tags,
+ * by the record it sits on, and by whoever made it. The song's tags are the
+ * only ones that distinguish one track on an album from another, so they lead;
+ * the artist's are the most complete and the least specific, so they fill gaps
+ * without ever setting the profile's direction. Layered by MAX rather than
+ * summed, since the same tag arriving from all three levels is one piece of
+ * evidence repeated, not three.
+ */
+const RECORDING_TAG_WEIGHT = 1;
+const ALBUM_TAG_WEIGHT = 0.6;
+const ARTIST_TAG_WEIGHT = 0.35;
+
+/** Alternate recording ids profiled per seed song. */
+const RECORDING_IDS_PER_SEED = 6;
+
+/** Neighbouring songs pulled per seed track. */
+const RECORDING_NEIGHBOURS = 60;
+
+/**
+ * Below this mean pairwise agreement the seeds are not describing one sound,
+ * and the playlist has to say so rather than implying a match it cannot make.
+ */
+const LOW_AGREEMENT = 0.25;
+
+/**
+ * How much being found from several seeds counts for.
+ *
+ * This is what makes a fourth pick worth adding. Genre fit already checks a
+ * candidate against the consensus, but co-listening carries information the
+ * tags do not — an artist who shows up in the neighbours of three of your five
+ * songs is a better answer than one who shows up beside a single song, even at
+ * equal genre fit, because three independent audiences put them there. At 0.6
+ * full corroboration is worth about a 60% lift, enough to reorder the shortlist
+ * without letting a well-connected artist ride on popularity alone.
+ */
+const CORROBORATION = 0.6;
+
+function layerTags(
+  target: Record<string, number>,
+  tags: Readonly<Record<string, number>> | undefined,
+  weight: number,
+): void {
+  if (!tags) return;
+  for (const [tag, strength] of Object.entries(tags)) {
+    const scaled = strength * weight;
+    if (scaled > (target[tag] ?? 0)) target[tag] = scaled;
+  }
+}
+
+function toSeeds(input: SoundsLikeInput): SoundsLikeSeed[] {
+  if (input.seedKind === "tracks") {
+    return (input.tracks ?? []).map((track) => ({
+      key: track.mbids[0] ?? `${track.title}::${track.artistNames[0] ?? ""}`,
+      title: track.title,
+      artistNames: track.artistNames,
+      artistMbid: track.artistMbid,
+      recordingMbids: track.mbids.slice(0, RECORDING_IDS_PER_SEED),
+      albumMbid: track.albumMbid,
+    }));
+  }
+
+  return (input.albums ?? []).map((album) => ({
+    key: album.mbid,
+    title: album.title,
+    artistNames: album.artistNames,
+    artistMbid: album.artistMbid,
+    recordingMbids: [],
+    albumMbid: album.mbid,
+  }));
+}
+
+/**
+ * Genre profiles for every seed, in three batched requests rather than three
+ * per seed.
+ */
+async function profileSeeds(seeds: readonly SoundsLikeSeed[]): Promise<SeedProfile[]> {
+  const recordingIds = seeds.flatMap((seed) => seed.recordingMbids);
+  const albumIds = seeds
+    .map((seed) => seed.albumMbid)
+    .filter((id): id is string => Boolean(id));
+  const artistIds = seeds
+    .map((seed) => seed.artistMbid)
+    .filter((id): id is string => Boolean(id));
+
+  const empty = new Map<string, Record<string, number>>();
+  const lookup = async (
+    ids: readonly string[],
+    fetcher?: (ids: readonly string[]) => Promise<{ data: Map<string, Record<string, number>> }>,
+  ) => {
+    if (ids.length === 0 || !fetcher) return empty;
+    // A missing layer costs precision, not correctness — the other two still
+    // describe the seed — so a failure here degrades rather than aborts.
+    return fetcher(ids).then((result) => result.data).catch(() => empty);
+  };
+
+  const [recordingTags, albumTags, artistTags] = await Promise.all([
+    lookup(recordingIds, catalog.getRecordingProfiles?.bind(catalog)),
+    lookup(albumIds, catalog.getReleaseGroupProfiles?.bind(catalog)),
+    lookup(artistIds, catalog.getTagProfiles?.bind(catalog)),
+  ]);
+
+  return seeds.map((seed) => {
+    const tags: Record<string, number> = {};
+    for (const mbid of seed.recordingMbids) {
+      layerTags(tags, recordingTags.get(mbid), RECORDING_TAG_WEIGHT);
+    }
+    if (seed.albumMbid) layerTags(tags, albumTags.get(seed.albumMbid), ALBUM_TAG_WEIGHT);
+    if (seed.artistMbid) layerTags(tags, artistTags.get(seed.artistMbid), ARTIST_TAG_WEIGHT);
+    return { key: seed.key, tags };
+  });
+}
+
+/**
+ * Artists worth considering, gathered from every seed and ranked against what
+ * the seeds agree on.
+ *
+ * Two channels, because they answer different questions. Song neighbours come
+ * from people who played THAT TRACK in the same session, which is the only
+ * signal that can tell one track on a record from another; artist neighbours
+ * are broader but exist for every seed and reach much further. Both feed the
+ * same pool, where being found twice is itself evidence.
+ */
+async function gatherSoundsLikeCandidates(
+  seeds: readonly SoundsLikeSeed[],
+  consensusTags: Readonly<Record<string, number>>,
+  limit: number,
+  band: ObscurityBand,
+  ctx: JobContext,
+): Promise<ScoredArtistRef[]> {
+  const identity = (ref: { name: string }) =>
+    normalizeArtistName(ref.name) || ref.name.trim().toLowerCase();
+
+  const excluded = new Set(
+    seeds.flatMap((seed) => seed.artistNames.map((name) => identity({ name }))),
+  );
+  const excludedMbids = new Set(
+    seeds.map((seed) => seed.artistMbid).filter((id): id is string => Boolean(id)),
+  );
+
+  const merged = new Map<string, ScoredArtistRef>();
+  /** Which seeds turned each candidate up — the corroboration count. */
+  const support = new Map<string, Set<string>>();
+
+  const absorb = (
+    seedKey: string,
+    neighbour: { mbid?: string; name: string; score: number; tags?: Record<string, number> },
+  ) => {
+    const key = identity(neighbour);
+    if (!key || excluded.has(key)) return;
+    if (neighbour.mbid && excludedMbids.has(neighbour.mbid)) return;
+
+    const existing = merged.get(key);
+    merged.set(key, {
+      ...(existing ?? {}),
+      mbid: existing?.mbid ?? neighbour.mbid,
+      name: existing?.name ?? neighbour.name,
+      tags: existing?.tags ?? neighbour.tags,
+      score: Math.max(existing?.score ?? 0, neighbour.score),
+    });
+
+    const seen = support.get(key);
+    if (seen) seen.add(seedKey);
+    else support.set(key, new Set([seedKey]));
+  };
+
+  const provider = similarityProviders[0];
+  const askFor = Math.max(100, limit * 3);
+
+  for (const [index, seed] of seeds.entries()) {
+    ctx.progress(index, seeds.length + 2, `Finding music like ${seed.title}…`);
+
+    if (seed.recordingMbids.length > 0 && provider.getSimilarRecordings) {
+      try {
+        const neighbours = await provider.getSimilarRecordings(
+          seed.recordingMbids,
+          RECORDING_NEIGHBOURS,
+        );
+        for (const row of neighbours.data) {
+          const name = row.artistNames[0];
+          if (!name) continue;
+          absorb(seed.key, { mbid: row.artistMbids[0], name, score: row.score });
+        }
+      } catch {
+        // No SLA on the labs endpoints; the artist channel still covers this seed.
+      }
+    }
+
+    if (seed.artistMbid) {
+      try {
+        const neighbours = await provider.getSimilarArtists(
+          { mbid: seed.artistMbid, name: seed.artistNames[0] ?? seed.title },
+          askFor,
+        );
+        for (const neighbour of neighbours.data) absorb(seed.key, neighbour);
+      } catch {
+        // Same.
+      }
+    }
+  }
+
+  if (merged.size === 0) return [];
+
+  ctx.progress(seeds.length, seeds.length + 2, "Checking genres…");
+  await attachTagProfiles(merged);
+
+  const seedCount = seeds.length;
+  const scored = [...merged.entries()].map(([key, candidate]) => {
+    const found = support.get(key)?.size ?? 1;
+    return {
+      candidate,
+      fit: candidate.tags ? tagCosine(consensusTags, candidate.tags) : undefined,
+      // Ranked, not scaled — see rankByGenreThenSimilarity — so what matters
+      // here is only that corroboration moves a candidate up the order.
+      similarity:
+        candidate.score *
+        (1 + CORROBORATION * ((found - 1) / Math.max(1, seedCount - 1))),
+    };
+  });
+
+  const measured = scored
+    .map((entry) => entry.fit)
+    .filter((fit): fit is number => fit !== undefined);
+  const meanFit =
+    measured.length > 0 ? measured.reduce((a, b) => a + b, 0) / measured.length : 0.5;
+
+  const withFit = scored.map((entry) => ({ ...entry, fit: entry.fit ?? meanFit }));
+
+  // Same reasoning as the single-artist path: about half of any co-listening
+  // list has no measurable genre relationship to the seed at all, and those are
+  // dropped unless doing so would leave too little to build from.
+  const onGenre = withFit.filter((entry) => entry.fit > 0);
+  const usable = onGenre.length >= limit ? onGenre : withFit;
+
+  const ordering = rankByGenreThenSimilarity(
+    usable.map((entry) => ({ similarity: entry.similarity, fit: entry.fit })),
+    band,
+  );
+
+  const pool = usable
+    .map((entry, index) => ({ ...entry.candidate, score: ordering[index] }))
+    .sort((a, b) => b.score - a.score);
+
+  for (const candidate of pool) {
+    if (candidate.mbid && candidate.tags) {
+      rememberArtist({ mbid: candidate.mbid, name: candidate.name, tags: candidate.tags });
+    }
+  }
+
+  return selectByDepth(pool, band, limit);
+}
+
+/**
+ * A playlist built from what several songs or albums have in common.
+ *
+ * The difference from the single-artist discovery mode is what the playlist is
+ * anchored to. There, the anchor is one artist's genre profile. Here it is the
+ * consensus across everything the listener picked — which is both narrower and
+ * better evidence, because a tag only survives it if more than one of their
+ * picks carries it.
+ */
+export async function runSoundsLike(
+  input: SoundsLikeInput,
+  ctx: JobContext,
+): Promise<GenerationResult> {
+  const { constraints } = input;
+  const warnings: string[] = [];
+  const seeds = toSeeds(input);
+  const noun = input.seedKind === "tracks" ? "song" : "album";
+
+  if (seeds.length === 0) {
+    return { warnings: [`No ${noun}s were chosen.`], trackCount: 0 };
+  }
+
+  ctx.progress(0, 5, `Reading your ${noun}${seeds.length === 1 ? "" : "s"}…`);
+
+  const consensus = consensusProfile(await profileSeeds(seeds));
+
+  if (consensus.usedSeeds === 0) {
+    return {
+      warnings: [
+        seeds.length === 1
+          ? `MusicBrainz has no genre information for that ${noun}, so there is nothing to match against. Adding a second ${noun} usually fixes it.`
+          : `MusicBrainz has no genre information for any of those ${noun}s, so there is nothing to match against. Try a better-known ${noun} alongside them.`,
+      ],
+      trackCount: 0,
+    };
+  }
+
+  if (consensus.usedSeeds < seeds.length) {
+    const missing = seeds.length - consensus.usedSeeds;
+    warnings.push(
+      `${missing} of your ${seeds.length} ${noun}s had no genre data, so the playlist was built from the other ${consensus.usedSeeds}.`,
+    );
+  }
+
+  if (consensus.usedSeeds >= 2 && consensus.agreement < LOW_AGREEMENT) {
+    warnings.push(
+      `Those ${noun}s have little in common musically, so this playlist covers all of them rather than matching one sound. Picks that sit closer together give a sharper result.`,
+    );
+  }
+
+  const wanted = Math.min(
+    MAX_SHORTLIST,
+    Math.ceil(
+      artistsNeededFor(constraints.targetLength, constraints.maxPerArtist) *
+        DISCOVERY_OVERSHOOT,
+    ),
+  );
+
+  const similar = await gatherSoundsLikeCandidates(
+    seeds,
+    consensus.tags,
+    wanted,
+    constraints.obscurity,
+    ctx,
+  );
+
+  if (similar.length === 0) {
+    return {
+      warnings: [
+        ...warnings,
+        `Nothing similar could be found for those ${noun}s. They may be too new or too obscure to have listening data yet.`,
+      ],
+      trackCount: 0,
+    };
+  }
+
+  const contributors = await loadContributors(similar, constraints, ctx, {
+    label: (name) => `Listening to ${name}…`,
+    withPopularity: true,
+    capacityTarget: Math.ceil(constraints.targetLength * DISCOVERY_OVERSHOOT),
+  });
+
+  const label =
+    seeds.length === 1 ? `"${seeds[0].title}"` : `these ${seeds.length} ${noun}s`;
+
+  const result = buildDiscovery({
+    seedArtistName: label,
+    seedTags: consensus.tags,
+    similar: contributors,
+    constraints,
+    reason:
+      seeds.length === 1
+        ? `sounds like ${label}`
+        : `sounds like your ${seeds.length} ${noun}s`,
+    // Everyone who made a seed is left out, on their own tracks and on other
+    // people's. Someone who names five songs is asking what else there is.
+    excludeCreditNames: seeds.flatMap((seed) => seed.artistNames),
+    excludeArtistKeys: new Set([
+      ...seeds.map((seed) => seed.artistMbid).filter((id): id is string => Boolean(id)),
+      ...seeds.flatMap((seed) => seed.artistNames),
+    ]),
+  });
+
+  return persist(input.playlistId, result, warnings);
+}
 
 // --- Style playlists -----------------------------------------------------
 

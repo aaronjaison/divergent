@@ -21,7 +21,7 @@ export default async function Home() {
         </p>
       </section>
 
-      <section className="grid gap-5 sm:grid-cols-3">
+      <section className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
         <Link
           href="/builder"
           className="group rounded-xl border border-border bg-surface p-6 transition-colors hover:border-accent"
@@ -58,6 +58,19 @@ export default async function Home() {
           <p className="mt-2 text-sm text-muted">
             Name an artist you love and hear everyone else who sounds like them
             — one track each, and never the artist you named.
+          </p>
+        </Link>
+
+        <Link
+          href="/sounds-like"
+          className="group rounded-xl border border-border bg-surface p-6 transition-colors hover:border-accent"
+        >
+          <h2 className="text-xl font-medium group-hover:text-accent">
+            Find music like this
+          </h2>
+          <p className="mt-2 text-sm text-muted">
+            Name up to five songs or three albums. We work out what they have in
+            common and build from that — the more you name, the sharper it gets.
           </p>
         </Link>
       </section>

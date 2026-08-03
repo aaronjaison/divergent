@@ -41,6 +41,21 @@ export function labsTagLicense(): LicenseClass {
 export const SIMILAR_ARTISTS_ALGORITHM =
   "session_based_days_7500_session_300_contribution_5_threshold_10_limit_100_filter_True_skip_30";
 
+/**
+ * The recording-level equivalent, and a DIFFERENT enum: the artist algorithm
+ * string is rejected here with a 400. This one has no `filter_True` and uses
+ * `threshold_15_limit_50`, which are the only combinations the endpoint accepts.
+ *
+ * Coverage is per-recording rather than per-song, which is the thing to know
+ * before relying on it: MusicBrainz holds a separate recording for the single,
+ * the album cut and every compilation appearance, and only the ones people
+ * actually played are in the index. Asked about the first search hit for Denzel
+ * Curry's "RICKY" it returns nothing; asked about the second it returns a
+ * hundred neighbours. Callers must try every candidate id for a song.
+ */
+export const SIMILAR_RECORDINGS_ALGORITHM =
+  "session_based_days_7500_session_300_contribution_5_threshold_15_limit_50_skip_30";
+
 export type LabsParams = Record<string, string | number | undefined>;
 
 /**

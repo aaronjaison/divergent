@@ -274,6 +274,10 @@ export const PLAYLIST_KINDS = [
   "introduce_blend",
   /** Similar artists only — the seed artist is deliberately absent. */
   "discover_artists",
+  /** Seeded by up to five songs; the seed artists are deliberately absent. */
+  "sounds_like_tracks",
+  /** Seeded by up to three albums; the seed artists are deliberately absent. */
+  "sounds_like_albums",
 ] as const;
 export type PlaylistKind = (typeof PLAYLIST_KINDS)[number];
 

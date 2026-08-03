@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  collapseRecordings,
   mapArtistSearchResult,
   mapReleaseGroup,
+  mapReleaseGroupSearchHit,
   mapReleaseTracks,
   mergeTags,
   parseYear,
   pickBestRelease,
+  queryFit,
 } from "./catalog";
 
 // The helpers under test are pure, but they sit in a module that transitively
@@ -587,5 +590,241 @@ describe("mapReleaseTracks", () => {
   it("returns nothing for a release with no media at all", () => {
     expect(mapReleaseTracks({ id: "x", title: "x" })).toEqual([]);
     expect(mapReleaseTracks({ id: "x", title: "x", media: null })).toEqual([]);
+  });
+});
+
+describe("queryFit", () => {
+  it("prefers the arrangement the listener actually typed", () => {
+    // MusicBrainz scores these the other way round: an album called Radiohead
+    // by a band called In Rainbows takes 100 and the record itself takes 82,
+    // because both match every word across the two fields.
+    const query = "in rainbows radiohead";
+    expect(queryFit(query, "In Rainbows", ["Radiohead"])).toBeGreaterThan(
+      queryFit(query, "Radiohead", ["In Rainbows"]),
+    );
+  });
+
+  it("prefers the hit that accounts for more of the query", () => {
+    const query = "black hole sun";
+    // A band called Black Hole takes the top three places on relevance alone.
+    expect(queryFit(query, "Black Hole Sun", ["Soundgarden"])).toBeGreaterThan(
+      queryFit(query, "Black Hole", ["Black Hole"]),
+    );
+  });
+
+  it("credits a word to the title first, so a self-titled act cannot claim it twice", () => {
+    expect(queryFit("black hole", "Black Hole", ["Black Hole"])).toBe(
+      queryFit("black hole", "Black Hole", ["Someone Else"]),
+    );
+  });
+
+  it("penalises a title carrying words nobody asked for", () => {
+    const query = "in rainbows radiohead";
+    expect(queryFit(query, "In Rainbows", ["Radiohead"])).toBeGreaterThan(
+      queryFit(query, "In Rainbows Disk 2", ["Radiohead"]),
+    );
+  });
+
+  it("scores an exact song-then-artist query at the maximum", () => {
+    expect(queryFit("karma police radiohead", "Karma Police", ["Radiohead"])).toBe(1);
+  });
+
+  it("ignores case, accents and punctuation", () => {
+    expect(queryFit("cafe bleu the style council", "Café Bleu", ["The Style Council"])).toBe(1);
+  });
+
+  it("returns 0 for an empty query rather than dividing by zero", () => {
+    expect(queryFit("", "Anything", ["Anyone"])).toBe(0);
+    expect(queryFit("   ", "Anything", ["Anyone"])).toBe(0);
+  });
+
+  it("handles a hit with no artist credit at all", () => {
+    expect(Number.isNaN(queryFit("something", "Something", []))).toBe(false);
+  });
+});
+
+describe("collapseRecordings", () => {
+  const recording = (
+    id: string,
+    title: string,
+    artist: string,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    id,
+    title,
+    score: 97,
+    "artist-credit": [{ name: artist }],
+    ...extra,
+  });
+
+  it("folds every pressing of one song into a single row", () => {
+    const rows = collapseRecordings(
+      [
+        recording("11111111-1111-1111-1111-111111111111", "Karma Police", "Radiohead"),
+        recording("22222222-2222-2222-2222-222222222222", "Karma Police", "Radiohead"),
+        recording("33333333-3333-3333-3333-333333333333", "Karma Police", "Radiohead"),
+      ],
+      10,
+      "karma police radiohead",
+    );
+
+    expect(rows).toHaveLength(1);
+    // Every candidate id survives: which one the similarity index knows about
+    // cannot be determined from here.
+    expect(rows[0].mbids).toHaveLength(3);
+  });
+
+  it("puts the original above its covers even when only the covers carry an ISRC", () => {
+    /**
+     * The measurement this scoring exists for. Asked for "running up that
+     * hill", MusicBrainz returns Kate Bush's original eight times over with no
+     * ISRC on any of them — nobody filed one in 1985 — while every cover is a
+     * modern digital release that has one. Ranking on ISRC put Club for Five,
+     * Kidz Bop and eight others above her.
+     */
+    const kateBush = Array.from({ length: 8 }, (_, i) =>
+      recording(`aaaaaaaa-aaaa-aaaa-aaaa-00000000000${i}`, "Running Up That Hill", "Kate Bush", {
+        length: 300_000,
+      }),
+    );
+    const cover = recording(
+      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      "Running Up That Hill",
+      "Kidz Bop",
+      { length: 216_888, isrcs: ["USAB02202167"], releases: [{ id: "r1" }, { id: "r2" }] },
+    );
+
+    const rows = collapseRecordings([cover, ...kateBush], 10, "running up that hill");
+    expect(rows[0].artistNames).toEqual(["Kate Bush"]);
+  });
+
+  it("still trusts the ISRC-bearing id WITHIN a song", () => {
+    // Between songs an ISRC means a distributor filed one. Within one song it
+    // means this is the id the listening data is likely to know.
+    const stub = recording("cccccccc-cccc-cccc-cccc-cccccccccccc", "RICKY", "Denzel Curry");
+    const real = recording("dddddddd-dddd-dddd-dddd-dddddddddddd", "RICKY", "Denzel Curry", {
+      length: 190_000,
+      isrcs: ["USUM71900001"],
+      releases: [{ id: "r1" }, { id: "r2" }, { id: "r3" }],
+    });
+
+    const [row] = collapseRecordings([stub, real], 10, "ricky denzel curry");
+    expect(row.mbids[0]).toBe("dddddddd-dddd-dddd-dddd-dddddddddddd");
+  });
+
+  it("drops music videos, which are not songs", () => {
+    const rows = collapseRecordings(
+      [
+        recording("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", "Creep", "Radiohead", {
+          video: true,
+        }),
+      ],
+      10,
+      "creep radiohead",
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it("keeps two different songs that share a title apart", () => {
+    const rows = collapseRecordings(
+      [
+        recording("ffffffff-ffff-ffff-ffff-ffffffffffff", "Alison", "Elvis Costello"),
+        recording("99999999-9999-9999-9999-999999999999", "Alison", "Slowdive"),
+      ],
+      10,
+      "alison slowdive",
+    );
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0].artistNames).toEqual(["Slowdive"]);
+  });
+
+  it("survives junk rows without an id or a title", () => {
+    const rows = collapseRecordings(
+      [{ id: null, title: "No id" }, { id: "x", title: null }, null, "nonsense"],
+      10,
+      "anything",
+    );
+    expect(rows).toEqual([]);
+  });
+});
+
+describe("mapReleaseGroupSearchHit ranking", () => {
+  const album = (
+    title: string,
+    artist: string,
+    score: number,
+    tags: { name: string; count: number }[],
+    primaryType = "Album",
+  ) => ({
+    id: `${title}-${artist}`.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+    title,
+    score,
+    "primary-type": primaryType,
+    "artist-credit": [{ name: artist }],
+    tags,
+  });
+
+  const scoreOf = (raw: unknown, query: string) =>
+    mapReleaseGroupSearchHit(raw, query)?.score ?? 0;
+
+  it("ranks a landmark record above an unrelated one that matched as a phrase", () => {
+    /**
+     * The measurement behind tagVotes. dismaxQuery boosts an exact-phrase title
+     * match to get short titles into the page at all, which hands "Nowhere Ride
+     * E.P." a normalised 100 and leaves Ride's Nowhere on 24. On tag COUNT the
+     * EP also wins — three tags to two that have any votes — and only the vote
+     * totals, 5 against 3, put the right record first.
+     */
+    const query = "nowhere ride";
+    const nowhere = album("Nowhere", "Ride", 24, [
+      { name: "rock", count: 2 },
+      { name: "shoegaze", count: 3 },
+      { name: "shoegazing", count: 0 },
+      { name: "indie", count: 0 },
+      { name: "noise pop", count: 0 },
+      { name: "shoegazer", count: 0 },
+    ]);
+    const phraseMatch = album(
+      "Nowhere Ride E.P.",
+      "The Chelsea Smiles",
+      100,
+      [
+        { name: "rock", count: 1 },
+        { name: "punk", count: 1 },
+        { name: "garage rock", count: 1 },
+      ],
+      "EP",
+    );
+
+    expect(scoreOf(nowhere, query)).toBeGreaterThan(scoreOf(phraseMatch, query));
+  });
+
+  it("does not count a curated genre twice", () => {
+    // MusicBrainz returns `genres` as a subset of `tags` with identical counts.
+    const withBoth = {
+      ...album("Kid A", "Radiohead", 100, [{ name: "electronic", count: 6 }]),
+      genres: [{ name: "electronic", count: 6 }],
+    };
+    const tagsOnly = album("Kid A", "Radiohead", 100, [
+      { name: "electronic", count: 6 },
+    ]);
+
+    expect(scoreOf(withBoth, "kid a")).toBe(scoreOf(tagsOnly, "kid a"));
+  });
+
+  it("ignores negative vote counts rather than subtracting them", () => {
+    const downvoted = album("Nowhere", "Ride", 24, [
+      { name: "shoegaze", count: 5 },
+      { name: "sacred cows", count: -3 },
+    ]);
+    const clean = album("Nowhere", "Ride", 24, [{ name: "shoegaze", count: 5 }]);
+
+    expect(scoreOf(downvoted, "nowhere ride")).toBe(scoreOf(clean, "nowhere ride"));
+  });
+
+  it("returns null for something that is not a release group at all", () => {
+    expect(mapReleaseGroupSearchHit("nonsense", "x")).toBeNull();
+    expect(mapReleaseGroupSearchHit(null, "x")).toBeNull();
   });
 });

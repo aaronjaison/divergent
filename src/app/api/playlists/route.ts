@@ -5,7 +5,12 @@ import { seedFromString } from "@/lib/engine/random";
 import { DEFAULT_CONSTRAINTS, MAX_PLAYLIST_LENGTH } from "@/lib/engine/types";
 import { getOrCreateSessionId } from "@/lib/session/anonSession";
 import { startJob, TooManyJobsError } from "@/lib/services/generationJobs";
-import { runDiscover, runIntroduce, runStyle } from "@/lib/services/playlistService";
+import {
+  runDiscover,
+  runIntroduce,
+  runSoundsLike,
+  runStyle,
+} from "@/lib/services/playlistService";
 
 const constraintsSchema = z.object({
   targetLength: z
@@ -46,10 +51,57 @@ const discoverSchema = z.object({
   constraints: constraintsSchema.optional(),
 });
 
+/**
+ * Seeds arrive as whole search results rather than as bare ids, so generation
+ * does not have to look each one up again to learn its title and artist. Zod
+ * strips anything else the client sent: tags in particular are re-fetched
+ * server-side, since a stale or edited profile would quietly steer the
+ * consensus.
+ */
+const trackSeedSchema = z.object({
+  mbids: z.array(z.string().uuid()).min(1).max(12),
+  title: z.string().min(1).max(300),
+  artistNames: z.array(z.string().min(1).max(200)).max(12),
+  artistMbid: z.string().uuid().optional(),
+  album: z.string().max(300).optional(),
+  albumMbid: z.string().uuid().optional(),
+  year: z.number().int().min(1000).max(2100).optional(),
+});
+
+const albumSeedSchema = z.object({
+  mbid: z.string().uuid(),
+  title: z.string().min(1).max(300),
+  artistNames: z.array(z.string().min(1).max(200)).max(12),
+  artistMbid: z.string().uuid().optional(),
+  year: z.number().int().min(1000).max(2100).optional(),
+});
+
+/**
+ * Five songs or three albums. Both caps are where another seed stops changing
+ * the answer — the consensus is already dominated by what the existing picks
+ * share — and every extra one costs a rate-limited round of lookups first.
+ */
+const soundsLikeSchema = z
+  .object({
+    mode: z.literal("sounds-like"),
+    seedKind: z.enum(["tracks", "albums"]),
+    tracks: z.array(trackSeedSchema).max(5).optional(),
+    albums: z.array(albumSeedSchema).max(3).optional(),
+    constraints: constraintsSchema.optional(),
+  })
+  .refine(
+    (body) =>
+      body.seedKind === "tracks"
+        ? (body.tracks?.length ?? 0) > 0
+        : (body.albums?.length ?? 0) > 0,
+    { message: "Pick at least one song or album." },
+  );
+
 const bodySchema = z.discriminatedUnion("mode", [
   styleSchema,
   introduceSchema,
   discoverSchema,
+  soundsLikeSchema,
 ]);
 
 const SUBMODE_KIND = {
@@ -63,6 +115,18 @@ const SUBMODE_TITLE = {
   deep: (name: string) => `${name}: deep cuts`,
   blend: (name: string) => `${name} and friends`,
 } as const;
+
+/** Names the first pick and counts the rest — a title has to fit on one line. */
+function soundsLikeTitle(body: z.infer<typeof soundsLikeSchema>): string {
+  const picks =
+    body.seedKind === "tracks"
+      ? (body.tracks ?? []).map((track) => track.title)
+      : (body.albums ?? []).map((album) => album.title);
+
+  if (picks.length === 0) return "Music like this";
+  if (picks.length === 1) return `Music like ${picks[0]}`;
+  return `Music like ${picks[0]} + ${picks.length - 1} more`;
+}
 
 export async function POST(request: Request) {
   let json: unknown;
@@ -100,14 +164,20 @@ export async function POST(request: Request) {
       ? body.tags.map((t) => t.tag).join(" + ")
       : body.mode === "discover"
         ? `Artists like ${body.artistName}`
-        : SUBMODE_TITLE[body.submode](body.artistName);
+        : body.mode === "sounds-like"
+          ? soundsLikeTitle(body)
+          : SUBMODE_TITLE[body.submode](body.artistName);
 
   const kind =
     body.mode === "style"
       ? "style"
       : body.mode === "discover"
         ? "discover_artists"
-        : SUBMODE_KIND[body.submode];
+        : body.mode === "sounds-like"
+          ? body.seedKind === "tracks"
+            ? "sounds_like_tracks"
+            : "sounds_like_albums"
+          : SUBMODE_KIND[body.submode];
 
   const seed = seedFromString(
     `${title}|${Date.now()}|${constraintValues.obscurity}`,
@@ -127,6 +197,18 @@ export async function POST(request: Request) {
     void startJob(playlistId, (ctx) => {
       if (body.mode === "style") {
         return runStyle({ playlistId, seeds: body.tags, constraints }, ctx);
+      }
+      if (body.mode === "sounds-like") {
+        return runSoundsLike(
+          {
+            playlistId,
+            seedKind: body.seedKind,
+            tracks: body.tracks,
+            albums: body.albums,
+            constraints,
+          },
+          ctx,
+        );
       }
       if (body.mode === "discover") {
         return runDiscover(

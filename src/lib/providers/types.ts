@@ -57,6 +57,62 @@ export interface AlbumRef {
   secondaryTypes?: string[];
 }
 
+/**
+ * An album a listener picked as a seed, carrying everything needed to profile
+ * it without a second lookup.
+ *
+ * A release-group search returns the album's whole tag list inline, and those
+ * tags are more specific than the artist's: Radiohead as an artist is
+ * "alternative rock", but "Kid A" is tagged electronic and experimental while
+ * "The Bends" is not. Seeding from a record therefore says something an artist
+ * name cannot.
+ */
+export interface ScoredAlbumRef extends AlbumRef {
+  score: number;
+  artistNames: string[];
+  /** Primary credited artist, when MusicBrainz gave one. */
+  artistMbid?: string;
+  disambiguation?: string;
+  tags?: Record<string, number>;
+}
+
+/**
+ * A song a listener picked as a seed.
+ *
+ * `mbids` is a list rather than a single id on purpose. MusicBrainz holds one
+ * recording per distinct performance, so a hit single exists a dozen times over
+ * — the single, the album cut, the compilation appearance, the video — and only
+ * some of those ids carry listening data. Keeping every candidate is what lets
+ * the similarity lookup try again instead of reporting that a famous song has
+ * no neighbours; ordered best-first, so the first is the one to display.
+ */
+export interface ScoredRecordingRef {
+  mbids: string[];
+  title: string;
+  artistNames: string[];
+  artistMbid?: string;
+  album?: string;
+  /** Release-GROUP mbid, not a release: the album, not one of its pressings. */
+  albumMbid?: string;
+  year?: number;
+  durationMs?: number;
+  isrc?: string;
+  /** The recording's own tags — sparse, but the sharpest signal there is. */
+  tags?: Record<string, number>;
+  score: number;
+}
+
+/** One neighbour of a seed recording, as co-listening sees it. */
+export interface SimilarRecording {
+  recordingMbid: string;
+  recordingName: string;
+  artistNames: string[];
+  /** Every artist credited on the neighbour, so no second lookup is needed. */
+  artistMbids: string[];
+  /** 0-1, normalised within the response. */
+  score: number;
+}
+
 export interface TrackRef {
   mbid?: string;
   externalId?: string;
@@ -94,6 +150,10 @@ export interface CatalogProvider {
   getArtist(mbid: string): Promise<Sourced<ArtistDetail> | null>;
   getArtistAlbums(mbid: string): Promise<Sourced<AlbumRef[]>>;
   getAlbumTracks(album: AlbumRef): Promise<Sourced<TrackRef[]>>;
+  /** Songs matching free text, for picking playlist seeds. */
+  searchRecordings(query: string, limit?: number): Promise<Sourced<ScoredRecordingRef[]>>;
+  /** Albums matching free text, for picking playlist seeds. */
+  searchReleaseGroups(query: string, limit?: number): Promise<Sourced<ScoredAlbumRef[]>>;
   /**
    * Genre profiles for many artists at once, keyed by MBID.
    *
@@ -102,6 +162,18 @@ export interface CatalogProvider {
    * artist-at-a-time lookup can afford at one request per second.
    */
   getTagProfiles?(mbids: readonly string[]): Promise<Sourced<Map<string, Record<string, number>>>>;
+  /** The same trick for albums, keyed by release-group MBID. */
+  getReleaseGroupProfiles?(
+    mbids: readonly string[],
+  ): Promise<Sourced<Map<string, Record<string, number>>>>;
+  /**
+   * And for individual songs, keyed by recording MBID. Sparse — most recordings
+   * carry no tags at all — but a song that has them describes itself better
+   * than its artist ever could.
+   */
+  getRecordingProfiles?(
+    mbids: readonly string[],
+  ): Promise<Sourced<Map<string, Record<string, number>>>>;
 }
 
 export interface TagProvider {
@@ -118,6 +190,18 @@ export interface TagProvider {
 export interface SimilarityProvider {
   readonly id: ProviderId;
   getSimilarArtists(artist: ArtistRef, limit?: number): Promise<Sourced<ScoredArtistRef[]>>;
+  /**
+   * Neighbours of one specific recording — the only signal that can tell
+   * "songs like this song" from "songs by artists like this artist". Optional,
+   * because only a session-based source has it at all.
+   *
+   * Callers pass every candidate MBID for the song: coverage is per-recording,
+   * so the album cut may be known to the index while the single is not.
+   */
+  getSimilarRecordings?(
+    recordingMbids: readonly string[],
+    limit?: number,
+  ): Promise<Sourced<SimilarRecording[]>>;
 }
 
 export interface PopularityProvider {

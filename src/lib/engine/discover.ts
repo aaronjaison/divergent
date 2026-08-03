@@ -36,13 +36,28 @@ export interface DiscoverInput {
   /** Only used for the per-track explanation; contributes no tracks. */
   seedArtistName: string;
   /**
-   * The seed artist's genre profile. Anchors the playlist's centre so it can
-   * settle into a corner of their sound without wandering out of it.
+   * The genre profile to build around. One artist's for a single-artist
+   * discovery; the consensus across several songs or albums when the listener
+   * seeded it that way. Anchors the playlist's centre so it can settle into a
+   * corner of the sound without wandering out of it.
    */
   seedTags?: Readonly<Record<string, number>>;
   /** Similar artists, each carrying a 0-1 similarity in `score`. */
   similar: { artist: EngineArtist; score: number }[];
   constraints: StyleConstraints;
+  /**
+   * Per-track explanation. Defaults to "sounds like <seedArtistName>", which is
+   * wrong once there are several seeds — "sounds like your 5 songs" is what a
+   * multi-seed playlist has to say.
+   */
+  reason?: string;
+  /**
+   * Names that must not appear in ANY credit on a track, beyond the artist keys
+   * excluded below. Defaults to the seed artist's name. A playlist promising
+   * everyone *else* breaks that promise on a guest verse just as surely as on a
+   * headline track, and credits are per track rather than per artist.
+   */
+  excludeCreditNames?: readonly string[];
   /**
    * Which part of each artist's catalogue to draw from. Defaults to their
    * best-known work: a playlist whose job is to make an introduction should
@@ -63,6 +78,8 @@ export function buildDiscovery(input: DiscoverInput): GeneratedPlaylist {
     constraints,
     trackBand = "easy",
     excludeArtistKeys = new Set(),
+    reason = `sounds like ${seedArtistName}`,
+    excludeCreditNames = [seedArtistName],
   } = input;
   const warnings: string[] = [];
 
@@ -130,14 +147,15 @@ export function buildDiscovery(input: DiscoverInput): GeneratedPlaylist {
   const queues: Queue<EngineTrack>[] = [];
   const reserves: EngineTrack[] = [];
 
-  // The seed artist is excluded by key upstream, but a track can still credit
-  // them as a guest on somebody else's record — a discovery playlist that ends
+  // The seed artists are excluded by key upstream, but a track can still credit
+  // one as a guest on somebody else's record — a discovery playlist that ends
   // on "PinkPantheress, Sam Gellaitry" has broken its one promise. Credits are
   // checked per track, not per artist.
-  const seedCredit = normalizeArtistName(seedArtistName);
+  const seedCredits = new Set(
+    excludeCreditNames.map((name) => normalizeArtistName(name)).filter((name) => name.length > 0),
+  );
   const creditsSeed = (track: EngineTrack) =>
-    seedCredit.length > 0 &&
-    track.artistNames.some((name) => normalizeArtistName(name) === seedCredit);
+    track.artistNames.some((name) => seedCredits.has(normalizeArtistName(name)));
 
   for (const entry of contributors) {
     const all = dedupeTracks(
@@ -176,14 +194,14 @@ export function buildDiscovery(input: DiscoverInput): GeneratedPlaylist {
       weight: entry.weight,
       items: picked.map((track) => ({
         ...track,
-        reason: `sounds like ${seedArtistName}`,
+        reason,
       })),
     });
 
     reserves.push(
       ...usable
         .filter((track) => !picked.includes(track))
-        .map((track) => ({ ...track, reason: `sounds like ${seedArtistName}` })),
+        .map((track) => ({ ...track, reason })),
     );
   }
 

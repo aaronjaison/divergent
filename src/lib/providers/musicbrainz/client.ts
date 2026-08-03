@@ -63,6 +63,61 @@ export async function mbFetch<S extends z.ZodType>(
 }
 
 /**
+ * Lucene metacharacters. Search endpoints parse the query, so an unescaped one
+ * in user input is at best a different search and at worst a 400 — a title as
+ * ordinary as "Where Is My Mind?" ends in a wildcard operator.
+ */
+const LUCENE_SYNTAX = /([+\-!(){}[\]^"~*?:\\/]|&&|\|\|)/g;
+
+/**
+ * Builds a query that scores every word against every listed field, so a hit
+ * matching more of them ranks higher.
+ *
+ * People type "karma police radiohead" as one string, and neither obvious
+ * approach survives that. Plain free text is actively wrong: it matches the
+ * artist's name inside a TITLE, so "Karma Police (Radiohead Cover)" by Car Seat
+ * Headrest scores a perfect 100 and Radiohead's own recording does not make the
+ * first twelve results. Searching the title field alone is no better, because
+ * "Alison" and "Ricky" each match several hundred unrelated songs.
+ *
+ * Pairing each word against both fields fixes it, because Lucene scores a
+ * document by how many clauses it satisfies: the real recording matches
+ * `recording:karma`, `recording:police` AND `artist:radiohead` — three — where
+ * the cover matches two. Measured across seven queries this returns the right
+ * song first every time.
+ *
+ * The whole query is then added again as a boosted PHRASE against the title
+ * field, which is what rescues short and common titles. Left to the per-word
+ * clauses alone, "kid a" matches 170,000 release-groups and Radiohead's is not
+ * among the first hundred — a two-letter clause discriminates nothing, so the
+ * page fills with self-titled records by bands called Kid. With the phrase
+ * clause the album is first. It costs nothing when it does not match, which is
+ * every query where the listener typed the artist too.
+ */
+const PHRASE_BOOST = 5;
+
+export function dismaxQuery(input: string, fields: readonly string[]): string {
+  const trimmed = input.trim();
+  const words = trimmed
+    .replace(LUCENE_SYNTAX, "\\$1")
+    .split(/\s+/)
+    .filter((word) => word.length > 0);
+
+  if (words.length === 0 || fields.length === 0) return "";
+
+  const perWord = words
+    .map((word) => `(${fields.map((field) => `${field}:${word}`).join(" OR ")})`)
+    .join(" ");
+
+  if (words.length < 2) return perWord;
+
+  // Only quotes and backslashes need escaping inside a phrase; everything else
+  // is literal there, and escaping it would stop the phrase matching.
+  const phrase = trimmed.replace(/["\\]/g, "\\$&");
+  return `(${fields[0]}:"${phrase}")^${PHRASE_BOOST} ${perWord}`;
+}
+
+/**
  * Parses list items independently, dropping the ones that don't fit. MB
  * occasionally returns an entity shape we don't model; one of those must not
  * empty an otherwise usable page.
@@ -124,6 +179,13 @@ export const mbArtistSchema = z.object({
 });
 export type MbArtist = z.infer<typeof mbArtistSchema>;
 
+export const mbArtistCreditSchema = z.object({
+  /** Credited-as name; can differ from artist.name and is what should display. */
+  name: z.string(),
+  joinphrase: optionalString,
+  artist: z.object({ id: optionalString, name: optionalString }).nullish(),
+});
+
 export const mbReleaseGroupSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -132,15 +194,16 @@ export const mbReleaseGroupSchema = z.object({
   /** "" when unknown — not null, not absent. */
   "first-release-date": optionalString,
   "secondary-types": z.array(z.string()).nullish(),
+  // Present on search hits only, and worth more than it looks: a release-group
+  // search returns the album's whole tag list inline, and album tags are far
+  // more specific than the artist's — "Kid A" is tagged electronic and
+  // experimental where Radiohead as a whole is alternative rock.
+  score: z.number().nullish(),
+  tags: z.array(mbTagSchema).nullish(),
+  genres: z.array(mbGenreSchema).nullish(),
+  "artist-credit": z.array(mbArtistCreditSchema).nullish(),
 });
 export type MbReleaseGroup = z.infer<typeof mbReleaseGroupSchema>;
-
-export const mbArtistCreditSchema = z.object({
-  /** Credited-as name; can differ from artist.name and is what should display. */
-  name: z.string(),
-  joinphrase: optionalString,
-  artist: z.object({ id: optionalString, name: optionalString }).nullish(),
-});
 
 export const mbRecordingSchema = z.object({
   id: optionalString,
@@ -150,7 +213,28 @@ export const mbRecordingSchema = z.object({
   /** [] when there are none, absent when inc=isrcs wasn't requested. */
   isrcs: z.array(z.string()).nullish(),
   "artist-credit": z.array(mbArtistCreditSchema).nullish(),
+  // Search hits only. Recording tags are sparse — most recordings carry none —
+  // but they are the sharpest signal in the catalogue when they are there:
+  // PinkPantheress's "Just for me" is tagged 2-step and contemporary r&b,
+  // where her artist profile is far broader.
+  score: z.number().nullish(),
+  tags: z.array(mbTagSchema).nullish(),
+  genres: z.array(mbGenreSchema).nullish(),
+  /** Search hits carry the releases a recording appears on, each with its group. */
+  releases: z
+    .array(
+      z.object({
+        id: optionalString,
+        title: optionalString,
+        date: optionalString,
+        "release-group": mbReleaseGroupSchema.nullish(),
+      }),
+    )
+    .nullish(),
+  /** True for video "recordings", which are not songs and must not be seeds. */
+  video: z.boolean().nullish(),
 });
+export type MbRecording = z.infer<typeof mbRecordingSchema>;
 
 export const mbTrackSchema = z.object({
   id: optionalString,
@@ -192,6 +276,22 @@ export const mbArtistSearchSchema = z.object({
   count: z.number().nullish(),
   offset: z.number().nullish(),
   artists: z.array(z.unknown()).nullish(),
+});
+
+export const mbRecordingSearchSchema = z.object({
+  count: z.number().nullish(),
+  offset: z.number().nullish(),
+  recordings: z.array(z.unknown()).nullish(),
+});
+
+/**
+ * The SEARCH envelope, which uses count/offset — unlike the browse envelope
+ * below, which prefixes its keys. Same entity, two different shapes.
+ */
+export const mbReleaseGroupSearchSchema = z.object({
+  count: z.number().nullish(),
+  offset: z.number().nullish(),
+  "release-groups": z.array(z.unknown()).nullish(),
 });
 
 /** Browse endpoints prefix their envelope keys instead of using count/offset. */

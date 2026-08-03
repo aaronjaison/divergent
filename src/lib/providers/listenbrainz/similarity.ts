@@ -3,6 +3,7 @@ import type {
   ArtistRef,
   ScoredArtistRef,
   SimilarityProvider,
+  SimilarRecording,
   Sourced,
 } from "@/lib/providers/types";
 import { sourced } from "@/lib/providers/types";
@@ -17,6 +18,7 @@ import {
   readString,
   scoreDivisor,
   SIMILAR_ARTISTS_ALGORITHM,
+  SIMILAR_RECORDINGS_ALGORITHM,
 } from "./client";
 
 interface ParsedRow {
@@ -75,8 +77,92 @@ export function mapSimilarArtists(
     .slice(0, Math.max(0, limit));
 }
 
+/**
+ * Rows carry `artist_credit_mbids` and `artist_credit_name` already, so a
+ * neighbouring RECORDING resolves to its artists without a second lookup —
+ * which is what makes this affordable at one seed song per request.
+ */
+export function mapSimilarRecordings(
+  raw: unknown,
+  seedMbids: ReadonlySet<string>,
+  limit: number,
+): SimilarRecording[] {
+  // Some labs endpoints answer with [[metadata], [rows]] rather than a bare
+  // array of rows, so the response is flattened one level before parsing.
+  const rows = Array.isArray(raw)
+    ? raw.flatMap((entry) => (Array.isArray(entry) ? entry : [entry]))
+    : [];
+
+  const parsed: { row: SimilarRecording; raw: number }[] = [];
+
+  for (const entry of rows) {
+    const record = asRecord(entry);
+    if (!record) continue;
+
+    const recordingMbid = readString(record.recording_mbid)?.toLowerCase();
+    const score = readNumber(record.score);
+    if (!recordingMbid || score === undefined) continue;
+    // The seed song is its own nearest neighbour.
+    if (seedMbids.has(recordingMbid)) continue;
+
+    const artistMbids = Array.isArray(record.artist_credit_mbids)
+      ? record.artist_credit_mbids
+          .map((value) => readString(value)?.toLowerCase())
+          .filter((value): value is string => Boolean(value) && isMbid(value as string))
+      : [];
+
+    const artistName = readString(record.artist_credit_name);
+
+    parsed.push({
+      row: {
+        recordingMbid,
+        recordingName: readString(record.recording_name) ?? "",
+        artistNames: artistName ? [artistName] : [],
+        artistMbids,
+        score: 0,
+      },
+      raw: score,
+    });
+  }
+
+  const divisor = scoreDivisor(parsed.map((entry) => entry.raw));
+
+  return parsed
+    .map((entry) => ({ ...entry.row, score: normaliseScore(entry.raw, divisor) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(0, limit));
+}
+
 export const listenBrainzSimilarity: SimilarityProvider = {
   id: LB_LABS_ID,
+
+  async getSimilarRecordings(
+    recordingMbids: readonly string[],
+    limit = 50,
+  ): Promise<Sourced<SimilarRecording[]>> {
+    const candidates = recordingMbids
+      .map((mbid) => mbid.trim().toLowerCase())
+      .filter((mbid) => isMbid(mbid));
+
+    const seen = new Set(candidates);
+
+    // Tried one at a time rather than all at once. The endpoint accepts a
+    // comma-separated list, but it pools the neighbours of everything it is
+    // given, so passing all six ids for one song would blend six versions'
+    // audiences and lose which one actually had data. Stopping at the first
+    // that answers keeps the request count at one for a well-known song.
+    for (const mbid of candidates) {
+      const raw = await labsFetch(
+        "similar-recordings",
+        { recording_mbids: mbid, algorithm: SIMILAR_RECORDINGS_ALGORITHM },
+        TTL.similarity,
+      );
+      const mapped = mapSimilarRecordings(raw, seen, limit);
+      if (mapped.length > 0) return sourced(mapped, LB_LABS_ID, LB_LABS_LICENSE);
+    }
+
+    return sourced<SimilarRecording[]>([], LB_LABS_ID, LB_LABS_LICENSE);
+  },
 
   async getSimilarArtists(
     artist: ArtistRef,

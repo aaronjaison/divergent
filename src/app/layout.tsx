@@ -35,7 +35,7 @@ export default function RootLayout({
             <Link href="/" className="font-semibold tracking-tight">
               Divergent
             </Link>
-            <div className="flex gap-5 text-sm text-muted">
+            <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm text-muted">
               <Link href="/builder" className="hover:text-foreground">
                 Build by style
               </Link>
@@ -44,6 +44,9 @@ export default function RootLayout({
               </Link>
               <Link href="/discover" className="hover:text-foreground">
                 Similar artists
+              </Link>
+              <Link href="/sounds-like" className="hover:text-foreground">
+                Music like this
               </Link>
             </div>
           </nav>
